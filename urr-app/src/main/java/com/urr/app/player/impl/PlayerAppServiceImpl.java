@@ -89,8 +89,7 @@ public class PlayerAppServiceImpl implements PlayerAppService {
 
         return playerMapper.selectList(new LambdaQueryWrapper<PlayerEntity>()
                 .eq(PlayerEntity::getAccountId, accountId)
-                .eq(PlayerEntity::getServerId, serverId)
-                .last("limit 1"));
+                .eq(PlayerEntity::getServerId, serverId));
     }
 
     @Override
@@ -114,8 +113,8 @@ public class PlayerAppServiceImpl implements PlayerAppService {
         Long mineCnt = playerMapper.selectCount(new LambdaQueryWrapper<PlayerEntity>()
                 .eq(PlayerEntity::getAccountId, accountId)
                 .eq(PlayerEntity::getServerId, serverId));
-        if (mineCnt != null && mineCnt > 0) {
-            throw new IllegalArgumentException("该账号在本区服已创建角色");
+        if (mineCnt != null && mineCnt > 4) {
+            throw new IllegalArgumentException("该账号在本区服已创建4个角色");
         }
 
         // 2) 区服内昵称唯一（匹配 uk_server_nickname）

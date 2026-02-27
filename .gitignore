@@ -1,1 +1,3 @@
 /urr-api/src/main/resources/application-dev.yml
+target/
+*.class
