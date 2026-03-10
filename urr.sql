@@ -11,7 +11,7 @@
  Target Server Version : 80042 (8.0.42)
  File Encoding         : 65001
 
- Date: 28/02/2026 10:39:58
+ Date: 10/03/2026 16:53:35
 */
 
 SET NAMES utf8mb4;
@@ -241,7 +241,7 @@ CREATE TABLE `t_urr_cfg_kv`  (
   PRIMARY KEY (`id`) USING BTREE,
   UNIQUE INDEX `uk_cfg_key`(`cfg_key` ASC) USING BTREE,
   INDEX `idx_update_time`(`update_time` ASC) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '通用配置表' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '通用配置表' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Records of t_urr_cfg_kv
@@ -274,7 +274,7 @@ CREATE TABLE `t_urr_craft_queue`  (
   INDEX `idx_server_player`(`server_id` ASC, `player_id` ASC) USING BTREE,
   INDEX `idx_player_state`(`player_id` ASC, `state` ASC) USING BTREE,
   INDEX `idx_finish_time`(`finish_time` ASC) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '制造队列(离线可结算)' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '制造队列(离线可结算)' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Records of t_urr_craft_queue
@@ -339,7 +339,7 @@ CREATE TABLE `t_urr_dungeon_run_log`  (
   PRIMARY KEY (`id`) USING BTREE,
   INDEX `idx_server_player_time`(`server_id` ASC, `player_id` ASC, `run_time` ASC) USING BTREE,
   INDEX `idx_dungeon_time`(`dungeon_id` ASC, `run_time` ASC) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '副本运行日志' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '副本运行日志' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Records of t_urr_dungeon_run_log
@@ -434,7 +434,7 @@ CREATE TABLE `t_urr_gather_profile`  (
   PRIMARY KEY (`id`) USING BTREE,
   INDEX `idx_skill_level`(`skill_id` ASC, `level_from` ASC, `level_to` ASC) USING BTREE,
   INDEX `idx_yield_item`(`yield_item_id` ASC) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '采集产出配置' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '采集产出配置' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Records of t_urr_gather_profile
@@ -502,7 +502,7 @@ CREATE TABLE `t_urr_mail`  (
   INDEX `idx_server_player_status`(`server_id` ASC, `player_id` ASC, `status` ASC) USING BTREE,
   INDEX `idx_send_time`(`send_time` ASC) USING BTREE,
   INDEX `idx_expire_time`(`expire_time` ASC) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '邮件/发奖' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '邮件/发奖' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Records of t_urr_mail
@@ -539,7 +539,7 @@ CREATE TABLE `t_urr_market_order`  (
   INDEX `idx_item_price`(`item_id` ASC, `price_each` ASC) USING BTREE,
   INDEX `idx_seller_time`(`seller_id` ASC, `create_time` ASC) USING BTREE,
   INDEX `idx_expire_time`(`expire_time` ASC) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '市场订单(挂单)' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '市场订单(挂单)' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Records of t_urr_market_order
@@ -575,7 +575,7 @@ CREATE TABLE `t_urr_market_trade`  (
   INDEX `idx_buyer_time`(`buyer_id` ASC, `trade_time` ASC) USING BTREE,
   INDEX `idx_seller_time`(`seller_id` ASC, `trade_time` ASC) USING BTREE,
   INDEX `idx_item_time`(`item_id` ASC, `trade_time` ASC) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '市场成交记录' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '市场成交记录' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Records of t_urr_market_trade
@@ -693,7 +693,7 @@ CREATE TABLE `t_urr_player_activity`  (
   INDEX `idx_server_player`(`server_id` ASC, `player_id` ASC) USING BTREE,
   INDEX `idx_activity_type`(`activity_type` ASC) USING BTREE,
   INDEX `idx_last_calc_time`(`last_calc_time` ASC) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '玩家当前活动状态' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '玩家当前活动状态' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Records of t_urr_player_activity
@@ -722,7 +722,7 @@ CREATE TABLE `t_urr_player_dungeon_progress`  (
   UNIQUE INDEX `uk_player_dungeon`(`player_id` ASC, `dungeon_id` ASC) USING BTREE,
   INDEX `idx_server_player`(`server_id` ASC, `player_id` ASC) USING BTREE,
   INDEX `idx_dungeon_id`(`dungeon_id` ASC) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '玩家副本进度' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '玩家副本进度' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Records of t_urr_player_dungeon_progress
@@ -755,7 +755,7 @@ CREATE TABLE `t_urr_player_equip`  (
   INDEX `idx_server_player`(`server_id` ASC, `player_id` ASC) USING BTREE,
   INDEX `idx_item_id`(`item_id` ASC) USING BTREE,
   INDEX `idx_state`(`state` ASC) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '玩家装备实例(非堆叠)' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '玩家装备实例(非堆叠)' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Records of t_urr_player_equip
@@ -783,7 +783,7 @@ CREATE TABLE `t_urr_player_item_stack`  (
   UNIQUE INDEX `uk_player_item_loc`(`player_id` ASC, `item_id` ASC, `location` ASC) USING BTREE,
   INDEX `idx_server_player`(`server_id` ASC, `player_id` ASC) USING BTREE,
   INDEX `idx_item_id`(`item_id` ASC) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '玩家堆叠物品(资源/材料/道具)' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '玩家堆叠物品(资源/材料/道具)' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Records of t_urr_player_item_stack
@@ -811,7 +811,7 @@ CREATE TABLE `t_urr_player_skill`  (
   UNIQUE INDEX `uk_player_skill`(`player_id` ASC, `skill_id` ASC) USING BTREE,
   INDEX `idx_server_player`(`server_id` ASC, `player_id` ASC) USING BTREE,
   INDEX `idx_skill_id`(`skill_id` ASC) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '玩家技能' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '玩家技能' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Records of t_urr_player_skill
@@ -836,7 +836,7 @@ CREATE TABLE `t_urr_rank_snapshot`  (
   `delete_flag` tinyint UNSIGNED NOT NULL DEFAULT 0 COMMENT '0未删除 1已删除',
   PRIMARY KEY (`id`) USING BTREE,
   INDEX `idx_server_rank_time`(`server_id` ASC, `rank_type` ASC, `snapshot_time` ASC) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '排行榜快照' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '排行榜快照' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Records of t_urr_rank_snapshot
@@ -867,7 +867,7 @@ CREATE TABLE `t_urr_recipe_def`  (
   PRIMARY KEY (`id`) USING BTREE,
   UNIQUE INDEX `uk_recipe_code`(`recipe_code` ASC) USING BTREE,
   INDEX `idx_craft_skill`(`craft_skill_id` ASC, `craft_level_req` ASC) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '制造配方定义' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '制造配方定义' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Records of t_urr_recipe_def
@@ -894,7 +894,7 @@ CREATE TABLE `t_urr_skill_def`  (
   PRIMARY KEY (`id`) USING BTREE,
   UNIQUE INDEX `uk_skill_code`(`skill_code` ASC) USING BTREE,
   INDEX `idx_skill_type`(`skill_type` ASC) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '技能定义表' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '技能定义表' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Records of t_urr_skill_def
@@ -954,7 +954,7 @@ CREATE TABLE `t_urr_wallet`  (
   UNIQUE INDEX `uk_player_currency`(`player_id` ASC, `currency_code` ASC) USING BTREE,
   INDEX `idx_server_player`(`server_id` ASC, `player_id` ASC) USING BTREE,
   INDEX `idx_currency`(`currency_code` ASC) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '玩家钱包' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '玩家钱包' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Records of t_urr_wallet
@@ -987,7 +987,7 @@ CREATE TABLE `t_urr_wallet_flow`  (
   INDEX `idx_server_player_time`(`server_id` ASC, `player_id` ASC, `flow_time` ASC) USING BTREE,
   INDEX `idx_reason_time`(`reason` ASC, `flow_time` ASC) USING BTREE,
   INDEX `idx_ref`(`ref_type` ASC, `ref_id` ASC) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '钱包流水' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '钱包流水' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Records of t_urr_wallet_flow
