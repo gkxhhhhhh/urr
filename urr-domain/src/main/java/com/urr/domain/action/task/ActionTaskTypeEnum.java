@@ -39,4 +39,22 @@ public enum ActionTaskTypeEnum {
      * 枚举说明。
      */
     private final String desc;
+
+    /**
+     * 按编码获取枚举。
+     *
+     * @param code 枚举编码
+     * @return 匹配到的枚举，未匹配时返回 null
+     */
+    public static ActionTaskTypeEnum fromCode(String code) {
+        if (code == null || code.trim().isEmpty()) {
+            return null;
+        }
+        for (ActionTaskTypeEnum item : values()) {
+            if (item.code.equalsIgnoreCase(code.trim())) {
+                return item;
+            }
+        }
+        return null;
+    }
 }
