@@ -1061,6 +1061,58 @@ CREATE TABLE `t_urr_player_gather_task` (
   COLLATE = utf8mb4_general_ci
   COMMENT = '玩家采集任务扩展真相表'
   ROW_FORMAT = Dynamic;
+
+
+-- =========================================================
+-- session 4: 采集任务启动 / 入队 / 替换当前任务
+-- 说明：
+-- 1. t_urr_player_activity 从“单角色唯一一条当前活动记录”调整为“动作任务根表”
+-- 2. 排队中的请求单独落到 t_urr_player_action_queue
+-- 3. 本次仍然不做队列自动消费，只做最小入队持久化
+-- =========================================================
+
+-- ---------------------------------------------------------
+-- 1) 解除 t_urr_player_activity 的 uk_player 唯一约束
+-- 说明：
+-- 1. 会话2把它升级成动作任务根表后，角色后续会有多条任务记录
+-- 2. 不解除唯一约束，就无法在“替换当前任务”时保留旧任务状态，也无法继续插入新任务
+-- ---------------------------------------------------------
+ALTER TABLE `t_urr_player_activity`
+DROP INDEX `uk_player`,
+ADD INDEX `idx_player_status_id` (`player_id`, `status`, `id`) USING BTREE,
+ADD INDEX `idx_player_task_type_status_id` (`player_id`, `task_type`, `status`, `id`) USING BTREE;
+
+-- ---------------------------------------------------------
+-- 2) 新增玩家动作队列表
+-- 说明：
+-- 1. 队列记录还没有真正启动，所以不应该提前占用 t_urr_player_activity / t_urr_player_gather_task
+-- 2. 队列顺序使用自增 id 作为最小顺序能力
+-- 3. 当前只先给采集任务使用，但表结构按角色通用动作队列设计
+-- ---------------------------------------------------------
+DROP TABLE IF EXISTS `t_urr_player_action_queue`;
+CREATE TABLE `t_urr_player_action_queue` (
+                                             `id` bigint UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键',
+                                             `player_id` bigint UNSIGNED NOT NULL COMMENT '玩家ID',
+                                             `server_id` int NOT NULL DEFAULT 1 COMMENT '区服ID',
+                                             `task_type` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '任务业务类型 GATHER/BATTLE/CRAFT',
+                                             `action_code` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '动作编码',
+                                             `target_count` bigint NOT NULL DEFAULT -1 COMMENT '目标轮次，当前主要给采集任务使用，-1 表示无限次数',
+                                             `status` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '队列状态，当前先使用 QUEUED',
+                                             `version` int NOT NULL DEFAULT 0 COMMENT '乐观锁',
+                                             `remarks` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '备注',
+                                             `create_user` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT '-1' COMMENT '添加人',
+                                             `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                                             `update_user` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT '-1' COMMENT '修改人',
+                                             `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '修改时间',
+                                             `delete_flag` tinyint UNSIGNED NOT NULL DEFAULT 0 COMMENT '0未删除 1已删除',
+                                             PRIMARY KEY (`id`) USING BTREE,
+                                             INDEX `idx_player_status_id` (`player_id`, `status`, `id`) USING BTREE,
+                                             INDEX `idx_player_task_type_status_id` (`player_id`, `task_type`, `status`, `id`) USING BTREE
+) ENGINE = InnoDB
+  CHARACTER SET = utf8mb4
+  COLLATE = utf8mb4_general_ci
+  COMMENT = '玩家动作队列'
+  ROW_FORMAT = Dynamic;
 -- ----------------------------
 -- Records of t_urr_wallet_flow
 -- ----------------------------

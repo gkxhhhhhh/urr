@@ -63,6 +63,8 @@ public class PlayerGatherTaskRepository {
         PlayerActionTaskEntity taskEntity = playerActionTaskMapper.selectOne(
                 new LambdaQueryWrapper<PlayerActionTaskEntity>()
                         .eq(PlayerActionTaskEntity::getPlayerId, playerId)
+                        .eq(PlayerActionTaskEntity::getTaskType, ActionTaskTypeEnum.GATHER.getCode())
+                        .orderByDesc(PlayerActionTaskEntity::getId)
                         .last("limit 1")
         );
         return buildGatherTask(taskEntity);

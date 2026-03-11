@@ -28,6 +28,12 @@ public final class ActionTaskConstants {
     public static final int MAX_OFFLINE_HOURS = 24;
 
     /**
+     * 单角色动作队列上限。
+     * 当前会话先固定为 10，后续可再配置化。
+     */
+    public static final int MAX_QUEUE_SIZE_PER_PLAYER = 10;
+
+    /**
      * 工具类不允许实例化。
      */
     private ActionTaskConstants() {
