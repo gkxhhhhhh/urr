@@ -28,6 +28,7 @@ public class PlayerGatherTask extends PlayerActionTask {
      * 1. completedCount 表示逻辑上已经完成的轮次。
      * 2. 这些轮次的奖励在业务语义上已经归属玩家。
      * 3. 但它们不一定已经正式刷入正式库存。
+     * 4. 本次推进时只推进新增完成部分，不重复结算已完成部分。
      */
     private Long completedCount;
 
@@ -68,7 +69,8 @@ public class PlayerGatherTask extends PlayerActionTask {
      *
      * 说明：
      * 1. 这里表达的是“锁定计划”，不是估算。
-     * 2. 当前会话只预留语义，不实现预生成逻辑。
+     * 2. 本会话已经支持“当前 segment 的最小锁定计划”。
+     * 3. 它只服务当前段，不做多段批量预生成。
      */
     private String currentSegmentRewardPlanJson;
 
@@ -76,8 +78,9 @@ public class PlayerGatherTask extends PlayerActionTask {
      * 已完成但尚未正式刷入正式库存的收益池。
      *
      * 说明：
-     * 1. 当前会话只预留字段语义。
-     * 2. 后续任何会消耗库存的行为，都应先 flush 这部分收益。
+     * 1. 这里表达的是“已完成但未正式入库”的聚合收益。
+     * 2. 本会话只聚合到 pending_reward_pool，不会正式写入背包/钱包。
+     * 3. 后续任何会消耗库存的行为，都应先 flush 这部分收益。
      */
     private String pendingRewardPoolJson;
 

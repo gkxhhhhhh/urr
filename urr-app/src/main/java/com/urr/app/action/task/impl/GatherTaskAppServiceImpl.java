@@ -1,12 +1,15 @@
 package com.urr.app.action.task.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.urr.app.action.task.GatherTaskAdvanceService;
 import com.urr.app.action.task.GatherTaskAppService;
 import com.urr.app.action.task.GatherTaskFactory;
 import com.urr.app.action.task.PlayerActionQueueRepository;
 import com.urr.app.action.task.PlayerActionTaskRepository;
+import com.urr.app.action.task.PlayerGatherTaskRedisConverter;
 import com.urr.app.action.task.PlayerGatherTaskRedisRepository;
 import com.urr.app.action.task.PlayerGatherTaskRepository;
+import com.urr.app.action.task.command.AdvanceGatherTaskCommand;
 import com.urr.app.action.task.command.EnqueueGatherTaskCommand;
 import com.urr.app.action.task.command.StartGatherTaskCommand;
 import com.urr.app.action.task.result.StartGatherTaskResult;
@@ -33,10 +36,9 @@ import java.util.Objects;
  *
  * 说明：
  * 1. 本类只做“开始采集 / 加入队列 / 替换当前任务”的最小编排。
- * 2. 当前还没有做懒结算。
- * 3. 当前还没有做 pending_reward_pool 业务推进。
- * 4. 当前还没有做 stop/flush 完整逻辑。
- * 5. 当前还没有做队列自动消费。
+ * 2. 当前已经接入“替换当前采集任务前先做一次最小懒推进”。
+ * 3. 当前还没有做 stop/flush 完整逻辑。
+ * 4. 当前还没有做队列自动消费。
  */
 @Service
 @RequiredArgsConstructor
@@ -76,6 +78,11 @@ public class GatherTaskAppServiceImpl implements GatherTaskAppService {
      * 采集任务工厂。
      */
     private final GatherTaskFactory gatherTaskFactory;
+
+    /**
+     * 采集任务最小懒推进服务。
+     */
+    private final GatherTaskAdvanceService gatherTaskAdvanceService;
 
     /**
      * 立即开始采集。
@@ -150,15 +157,16 @@ public class GatherTaskAppServiceImpl implements GatherTaskAppService {
                                                              Long targetCount,
                                                              PlayerActionTask runningTask) {
         Long replacedTaskId = runningTask.getId();
+        if (ActionTaskTypeEnum.GATHER.equals(runningTask.getTaskType())) {
+            advanceGatherTaskBeforeReplace(replacedTaskId);
+        }
 
         playerActionTaskRepository.stopByUserReplace(replacedTaskId);
-
         StartGatherTaskResult result = startNewRunningTask(player, action, targetCount, replacedTaskId);
 
         if (ActionTaskTypeEnum.GATHER.equals(runningTask.getTaskType())) {
-            playerGatherTaskRedisRepository.deleteTaskHotState(player.getId(), replacedTaskId);
+            refreshStoppedGatherHotState(player.getId(), replacedTaskId);
         }
-
         return result;
     }
 
@@ -192,6 +200,43 @@ public class GatherTaskAppServiceImpl implements GatherTaskAppService {
         result.setQueuePosition(null);
         result.setReplacedTaskId(replacedTaskId);
         return result;
+    }
+
+    /**
+     * 在替换旧采集任务前，先把它推进到当前时刻。
+     *
+     * @param taskId 旧采集任务ID
+     */
+    private void advanceGatherTaskBeforeReplace(Long taskId) {
+        AdvanceGatherTaskCommand advanceCommand = new AdvanceGatherTaskCommand();
+        advanceCommand.setTaskId(taskId);
+        advanceCommand.setAdvanceTime(LocalDateTime.now());
+        gatherTaskAdvanceService.advanceTo(advanceCommand);
+    }
+
+    /**
+     * 刷新被替换采集任务的 Redis 热态。
+     *
+     * 说明：
+     * 1. 运行槽位 / 运行态 / 当前段计划可以删除。
+     * 2. 如果仍有 pending_reward_pool，则继续保留热态镜像，方便后续 flush 前读取。
+     *
+     * @param playerId 玩家ID
+     * @param taskId 任务ID
+     */
+    private void refreshStoppedGatherHotState(Long playerId, Long taskId) {
+        playerGatherTaskRedisRepository.deleteRunningTaskIfMatch(playerId, taskId);
+        playerGatherTaskRedisRepository.deleteRuntime(taskId);
+        playerGatherTaskRedisRepository.deleteSegmentPlan(taskId);
+
+        PlayerGatherTask stoppedTask = playerGatherTaskRepository.findByTaskId(taskId);
+        if (stoppedTask == null || !stoppedTask.hasPendingRewardPool()) {
+            playerGatherTaskRedisRepository.deletePendingRewardPool(taskId);
+            return;
+        }
+        playerGatherTaskRedisRepository.savePendingRewardPool(
+                PlayerGatherTaskRedisConverter.toPendingRewardPoolCache(stoppedTask)
+        );
     }
 
     /**

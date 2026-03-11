@@ -55,7 +55,7 @@ public class GatherTaskSegmentPlanCache {
      *
      * 说明：
      * 1. 这里表达的是“锁定计划”，不是估算。
-     * 2. 当前会话不实现掉落生成，只预留承载字段。
+     * 2. 本会话已经支持最小的当前段锁定奖励计划。
      */
     private String planJson;
 
