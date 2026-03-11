@@ -989,6 +989,78 @@ CREATE TABLE `t_urr_wallet_flow`  (
   INDEX `idx_ref`(`ref_type` ASC, `ref_id` ASC) USING BTREE
 ) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '钱包流水' ROW_FORMAT = Dynamic;
 
+
+-- =========================================================
+-- 会话2：采集任务数据库真相层（增量）
+-- 建议位置：t_urr_player / t_urr_player_activity 附近
+-- =========================================================
+
+-- ---------------------------------------------------------
+-- 1) 玩家表补充最近交互时间
+-- 说明：
+-- 1. 每个角色有 last_interact_time
+-- 2. 任务启动时，会把这个值锁定到任务根表
+-- 3. 本次只做字段落库，不做更新逻辑
+-- ---------------------------------------------------------
+ALTER TABLE `t_urr_player`
+ADD COLUMN `last_interact_time` datetime NULL DEFAULT NULL COMMENT '最近一次交互时间' AFTER `last_online_time`;
+
+
+-- ---------------------------------------------------------
+-- 2) 复用现有 t_urr_player_activity 作为通用动作任务根表
+-- 说明：
+-- 1. 保留原有 behavior_id / action_id / activity_type / state / target_id / param_json
+-- 2. 本次新增一组更贴近会话1 task 模型的根字段
+-- 3. activity_type / state 先作为兼容旧活动模型的字段保留
+-- 4. 新真相语义以后以 task_type / status / stop_reason 为准
+-- ---------------------------------------------------------
+ALTER TABLE `t_urr_player_activity`
+ADD COLUMN `action_code` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '动作编码，对应 t_urr_action_def.action_code' AFTER `action_id`,
+ADD COLUMN `task_type` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '任务业务类型 GATHER/BATTLE/CRAFT' AFTER `action_code`,
+ADD COLUMN `status` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '任务状态 QUEUED/RUNNING/COMPLETED/STOPPED/EXPIRED/FAILED' AFTER `task_type`,
+ADD COLUMN `stop_reason` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '任务停止/结束原因 USER_STOP/USER_REPLACE/OFFLINE_TIMEOUT/FINISHED/ERROR' AFTER `status`,
+ADD COLUMN `last_interact_time` datetime NULL DEFAULT NULL COMMENT '本次任务锁定的最近交互时间' AFTER `start_time`,
+ADD COLUMN `offline_expire_at` datetime NULL DEFAULT NULL COMMENT '本次任务锁定的离线截止时间' AFTER `last_settle_time`,
+ADD COLUMN `reward_seed` bigint NULL DEFAULT NULL COMMENT '奖励随机种子' AFTER `offline_expire_at`,
+ADD INDEX `idx_task_type_status` (`task_type`, `status`) USING BTREE,
+ADD INDEX `idx_offline_expire_at` (`offline_expire_at`) USING BTREE;
+
+
+-- ---------------------------------------------------------
+-- 3) 新增采集任务扩展真相表
+-- 说明：
+-- 1. 一条采集任务，对应一条 t_urr_player_activity 根记录
+-- 2. task_id = t_urr_player_activity.id
+-- 3. completed_count = 已完成轮次，奖励逻辑上已归属玩家
+-- 4. flushed_count = 已正式刷入正式库存的轮次
+-- 5. stat_snapshot 用 JSON，贴合当前仓库 frozen snapshot 风格
+-- 6. current_segment_reward_plan_json / pending_reward_pool_json 这次只预留，不实现逻辑
+-- ---------------------------------------------------------
+DROP TABLE IF EXISTS `t_urr_player_gather_task`;
+CREATE TABLE `t_urr_player_gather_task` (
+  `task_id` bigint UNSIGNED NOT NULL COMMENT '对应 t_urr_player_activity.id',
+  `target_count` bigint NOT NULL DEFAULT -1 COMMENT '目标轮次，-1 表示无限次数',
+  `completed_count` bigint NOT NULL DEFAULT 0 COMMENT '已完成轮次，奖励逻辑上已归属玩家',
+  `flushed_count` bigint NOT NULL DEFAULT 0 COMMENT '已正式刷入正式库存的轮次',
+  `current_segment_start` bigint NULL DEFAULT NULL COMMENT '当前分段开始轮次（含，建议1-based）',
+  `current_segment_end` bigint NULL DEFAULT NULL COMMENT '当前分段结束轮次（含，建议1-based）',
+  `segment_size` int NOT NULL DEFAULT 10 COMMENT '分段大小，当前默认10',
+  `stat_snapshot` json NOT NULL COMMENT '采集任务启动时锁定的属性快照',
+  `current_segment_reward_plan_json` json NULL COMMENT '当前分段锁定奖励计划（锁定计划，不是估算）',
+  `pending_reward_pool_json` json NULL COMMENT '已完成但尚未正式刷入正式库存的收益池',
+  `version` int NOT NULL DEFAULT 0 COMMENT '乐观锁',
+  `remarks` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '备注',
+  `create_user` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT '-1' COMMENT '添加人',
+  `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `update_user` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL DEFAULT '-1' COMMENT '修改人',
+  `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '修改时间',
+  `delete_flag` tinyint UNSIGNED NOT NULL DEFAULT 0 COMMENT '0未删除 1已删除',
+  PRIMARY KEY (`task_id`) USING BTREE
+) ENGINE = InnoDB
+  CHARACTER SET = utf8mb4
+  COLLATE = utf8mb4_general_ci
+  COMMENT = '玩家采集任务扩展真相表'
+  ROW_FORMAT = Dynamic;
 -- ----------------------------
 -- Records of t_urr_wallet_flow
 -- ----------------------------
