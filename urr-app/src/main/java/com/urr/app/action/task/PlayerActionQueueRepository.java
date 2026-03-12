@@ -2,10 +2,15 @@ package com.urr.app.action.task;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.urr.domain.action.task.ActionTaskStatusEnum;
+import com.urr.domain.action.task.ActionTaskTypeEnum;
 import com.urr.domain.action.task.PlayerActionQueueEntity;
 import com.urr.infra.mapper.PlayerActionQueueMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Repository;
+import org.springframework.util.StringUtils;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * 玩家动作队列仓储。
@@ -34,13 +39,40 @@ public class PlayerActionQueueRepository {
         if (playerId == null) {
             return 0L;
         }
-
         Long count = playerActionQueueMapper.selectCount(
                 new LambdaQueryWrapper<PlayerActionQueueEntity>()
                         .eq(PlayerActionQueueEntity::getPlayerId, playerId)
                         .eq(PlayerActionQueueEntity::getStatus, ActionTaskStatusEnum.QUEUED.getCode())
         );
         return count == null ? 0L : count.longValue();
+    }
+
+    /**
+     * 查询角色当前排队中的记录。
+     *
+     * 说明：
+     * 1. 当前主要给采集读接口使用。
+     * 2. taskType 为空时表示读取全部业务类型；有值时按业务类型过滤。
+     * 3. 结果按自增 id 正序返回，对应最小队列顺序语义。
+     *
+     * @param playerId 玩家ID
+     * @param taskType 任务类型
+     * @return 队列记录列表
+     */
+    public List<PlayerActionQueueEntity> findQueuedByPlayerIdAndTaskType(Long playerId, ActionTaskTypeEnum taskType) {
+        if (playerId == null) {
+            return new ArrayList<PlayerActionQueueEntity>();
+        }
+
+        LambdaQueryWrapper<PlayerActionQueueEntity> queryWrapper = new LambdaQueryWrapper<PlayerActionQueueEntity>()
+                .eq(PlayerActionQueueEntity::getPlayerId, playerId)
+                .eq(PlayerActionQueueEntity::getStatus, ActionTaskStatusEnum.QUEUED.getCode())
+                .orderByAsc(PlayerActionQueueEntity::getId);
+
+        if (taskType != null && StringUtils.hasText(taskType.getCode())) {
+            queryWrapper.eq(PlayerActionQueueEntity::getTaskType, taskType.getCode());
+        }
+        return playerActionQueueMapper.selectList(queryWrapper);
     }
 
     /**
@@ -67,7 +99,6 @@ public class PlayerActionQueueRepository {
         if (playerId == null || queueId == null) {
             return 0;
         }
-
         Long count = playerActionQueueMapper.selectCount(
                 new LambdaQueryWrapper<PlayerActionQueueEntity>()
                         .eq(PlayerActionQueueEntity::getPlayerId, playerId)

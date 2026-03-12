@@ -86,6 +86,41 @@ public class PlayerGatherTaskRepository {
     }
 
     /**
+     * 查询角色当前仍有 pending_reward_pool 的采集任务列表。
+     *
+     * 说明：
+     * 1. 这里只服务读接口的展示库存拼装。
+     * 2. 当前先按玩家自己的采集任务列表顺序扫描，保持实现简单。
+     * 3. 判定条件以 completedCount > flushedCount 或 pendingRewardPoolJson 非空为准。
+     *
+     * @param playerId 玩家ID
+     * @return 仍有 pending 的采集任务列表
+     */
+    public java.util.List<PlayerGatherTask> findPendingRewardTaskListByPlayerId(Long playerId) {
+        java.util.List<PlayerGatherTask> result = new java.util.ArrayList<PlayerGatherTask>();
+        if (playerId == null) {
+            return result;
+        }
+
+        java.util.List<PlayerActionTaskEntity> taskEntityList = playerActionTaskMapper.selectList(
+                new LambdaQueryWrapper<PlayerActionTaskEntity>()
+                        .eq(PlayerActionTaskEntity::getPlayerId, playerId)
+                        .eq(PlayerActionTaskEntity::getTaskType, ActionTaskTypeEnum.GATHER.getCode())
+                        .orderByDesc(PlayerActionTaskEntity::getId)
+        );
+        for (int i = 0; i < taskEntityList.size(); i++) {
+            PlayerGatherTask task = buildGatherTask(taskEntityList.get(i));
+            if (task == null) {
+                continue;
+            }
+            if (task.hasPendingRewardToFlush() || task.hasPendingRewardPool()) {
+                result.add(task);
+            }
+        }
+        return result;
+    }
+
+    /**
      * 新增一条采集任务。
      *
      * @param task 采集任务领域对象
@@ -125,18 +160,27 @@ public class PlayerGatherTaskRepository {
 
         normalizeTaskForUpdate(task, actionTaskEntity);
         fillActionTaskEntityForUpdate(actionTaskEntity, task);
-        playerActionTaskMapper.updateById(actionTaskEntity);
+        int actionRows = playerActionTaskMapper.updateById(actionTaskEntity);
+        if (actionRows != 1) {
+            throw new IllegalStateException("更新动作任务根记录失败，taskId=" + task.getId());
+        }
 
         PlayerGatherTaskEntity gatherTaskEntity = playerGatherTaskMapper.selectById(task.getId());
         if (gatherTaskEntity == null) {
             gatherTaskEntity = new PlayerGatherTaskEntity();
             fillGatherTaskEntity(gatherTaskEntity, task);
-            playerGatherTaskMapper.insert(gatherTaskEntity);
+            int insertRows = playerGatherTaskMapper.insert(gatherTaskEntity);
+            if (insertRows != 1) {
+                throw new IllegalStateException("新增采集任务扩展记录失败，taskId=" + task.getId());
+            }
             return;
         }
 
         fillGatherTaskEntity(gatherTaskEntity, task);
-        playerGatherTaskMapper.updateById(gatherTaskEntity);
+        int gatherRows = playerGatherTaskMapper.updateById(gatherTaskEntity);
+        if (gatherRows != 1) {
+            throw new IllegalStateException("更新采集任务扩展记录失败，taskId=" + task.getId());
+        }
     }
 
     /**
@@ -339,24 +383,44 @@ public class PlayerGatherTaskRepository {
     }
 
     /**
-     * 把采集快照对象序列化成 JSON。
+     * 根据任务状态构建兼容旧字段的 state。
      *
-     * @param snapshot 采集快照
-     * @return JSON 字符串
+     * @param status 任务状态
+     * @return 旧 state 数值
      */
-    private String writeStatSnapshot(GatherTaskStatSnapshot snapshot) {
-        if (snapshot == null) {
-            return "{}";
+    private Integer buildLegacyState(ActionTaskStatusEnum status) {
+        if (status == null) {
+            return 0;
         }
-        try {
-            return objectMapper.writeValueAsString(snapshot);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("采集任务 statSnapshot 序列化失败", e);
+        if (ActionTaskStatusEnum.QUEUED.equals(status)) {
+            return 0;
         }
+        if (ActionTaskStatusEnum.RUNNING.equals(status)) {
+            return 1;
+        }
+        if (ActionTaskStatusEnum.COMPLETED.equals(status)) {
+            return 2;
+        }
+        if (ActionTaskStatusEnum.STOPPED.equals(status)
+                || ActionTaskStatusEnum.EXPIRED.equals(status)
+                || ActionTaskStatusEnum.FAILED.equals(status)) {
+            return 3;
+        }
+        return 0;
     }
 
     /**
-     * 把 JSON 反序列化成采集快照对象。
+     * 获取停止原因编码。
+     *
+     * @param stopReason 停止原因枚举
+     * @return 停止原因编码
+     */
+    private String getStopReasonCode(ActionTaskStopReasonEnum stopReason) {
+        return stopReason == null ? null : stopReason.getCode();
+    }
+
+    /**
+     * 读取采集快照 JSON。
      *
      * @param json JSON 字符串
      * @return 采集快照对象
@@ -368,36 +432,24 @@ public class PlayerGatherTaskRepository {
         try {
             return objectMapper.readValue(json, GatherTaskStatSnapshot.class);
         } catch (IOException e) {
-            throw new IllegalStateException("采集任务 statSnapshot 反序列化失败", e);
+            throw new IllegalStateException("解析采集快照失败", e);
         }
     }
 
     /**
-     * 获取 stopReason 的数据库编码。
+     * 写出采集快照 JSON。
      *
-     * @param stopReason 停止原因枚举
-     * @return 数据库存储编码
+     * @param snapshot 采集快照
+     * @return JSON 字符串
      */
-    private String getStopReasonCode(ActionTaskStopReasonEnum stopReason) {
-        if (stopReason == null) {
+    private String writeStatSnapshot(GatherTaskStatSnapshot snapshot) {
+        if (snapshot == null) {
             return null;
         }
-        return stopReason.getCode();
-    }
-
-    /**
-     * 把新任务状态映射到旧 activity.state。
-     *
-     * @param status 新任务状态
-     * @return 旧 activity.state 值
-     */
-    private Integer buildLegacyState(ActionTaskStatusEnum status) {
-        if (status == null) {
-            return 1;
+        try {
+            return objectMapper.writeValueAsString(snapshot);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("序列化采集快照失败", e);
         }
-        if (ActionTaskStatusEnum.QUEUED.equals(status) || ActionTaskStatusEnum.RUNNING.equals(status)) {
-            return 1;
-        }
-        return 3;
     }
 }
