@@ -17,7 +17,7 @@ import java.time.LocalDateTime;
  *
  * 说明：
  * 1. 这里承接 stop / replace 共用的最小闭环。
- * 2. 顺序固定为：先 advance，再 flush，再 stop，再清 Redis 热态。
+ * 2. 顺序固定为：先恢复，再 advance，再 flush，再 stop，再清 Redis 热态。
  * 3. 当前不负责自动消费队列下一个任务。
  */
 @Service
@@ -45,6 +45,11 @@ public class GatherTaskStopService {
     private final GatherTaskPendingRewardFlushService gatherTaskPendingRewardFlushService;
 
     /**
+     * 采集任务运行态恢复服务。
+     */
+    private final GatherTaskRuntimeRecoveryService gatherTaskRuntimeRecoveryService;
+
+    /**
      * 停止一条采集任务。
      *
      * @param taskId 任务ID
@@ -59,7 +64,9 @@ public class GatherTaskStopService {
         LocalDateTime operateTime = stopTime == null ? LocalDateTime.now() : stopTime;
         PlayerGatherTask task = requireRunningTask(taskId);
 
+        gatherTaskRuntimeRecoveryService.recoverHotStateIfNecessary(task);
         advanceToCurrentTime(task.getId(), operateTime);
+
         PendingRewardFlushResult flushResult = gatherTaskPendingRewardFlushService.flushPendingReward(task.getId());
 
         PlayerGatherTask latestTask = playerGatherTaskRepository.findByTaskId(task.getId());

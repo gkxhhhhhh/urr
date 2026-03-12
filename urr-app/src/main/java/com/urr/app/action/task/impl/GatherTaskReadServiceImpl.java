@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.urr.app.action.task.GatherTaskAdvanceService;
 import com.urr.app.action.task.GatherTaskReadService;
+import com.urr.app.action.task.GatherTaskRuntimeRecoveryService;
 import com.urr.app.action.task.GatherTaskViewAssembler;
 import com.urr.app.action.task.PlayerActionQueueRepository;
 import com.urr.app.action.task.PlayerActionTaskRepository;
@@ -53,6 +54,7 @@ import java.util.Set;
  * 1. 这里只补“采集面板”需要的最小读能力。
  * 2. 运行态 / segment / pending 优先读 Redis 热态，缺失时回退到数据库镜像字段。
  * 3. 正式库存直接读正式表，不额外发明新的库存系统。
+ * 4. 查询前会先做一次当前运行任务的热态兜底恢复。
  */
 @Service
 @RequiredArgsConstructor
@@ -87,6 +89,11 @@ public class GatherTaskReadServiceImpl implements GatherTaskReadService {
      * 最小懒推进服务。
      */
     private final GatherTaskAdvanceService gatherTaskAdvanceService;
+
+    /**
+     * 采集任务运行态恢复服务。
+     */
+    private final GatherTaskRuntimeRecoveryService gatherTaskRuntimeRecoveryService;
 
     /**
      * 动作定义 Mapper。
@@ -192,7 +199,8 @@ public class GatherTaskReadServiceImpl implements GatherTaskReadService {
      *
      * 说明：
      * 1. 只有当前运行任务确实是 GATHER 时，才会进入采集读链路。
-     * 2. 读之前会做一次非常克制的最小 advance，确保进度 / pending 展示尽量接近当前时刻。
+     * 2. 查询前先做一次最小热态恢复，确保 Redis 丢失后仍可继续读。
+     * 3. 读之前会做一次非常克制的最小 advance，确保进度 / pending 展示尽量接近当前时刻。
      *
      * @param playerId 角色ID
      * @param readTime 读取时刻
@@ -207,11 +215,19 @@ public class GatherTaskReadServiceImpl implements GatherTaskReadService {
             return null;
         }
 
+        PlayerGatherTask gatherTask = playerGatherTaskRepository.findByTaskId(runningTask.getId());
+        if (gatherTask == null) {
+            return null;
+        }
+
+        gatherTaskRuntimeRecoveryService.recoverHotStateIfNecessary(gatherTask);
+
         AdvanceGatherTaskCommand command = new AdvanceGatherTaskCommand();
-        command.setTaskId(runningTask.getId());
+        command.setTaskId(gatherTask.getId());
         command.setAdvanceTime(readTime);
         gatherTaskAdvanceService.advanceTo(command);
-        return playerGatherTaskRepository.findByTaskId(runningTask.getId());
+
+        return playerGatherTaskRepository.findByTaskId(gatherTask.getId());
     }
 
     /**

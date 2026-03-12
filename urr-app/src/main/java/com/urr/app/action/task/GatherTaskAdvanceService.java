@@ -27,8 +27,8 @@ import java.util.List;
  * 说明：
  * 1. 这里专门负责“把当前采集任务按需推进到某个时刻”。
  * 2. 推进结果只落到 completedCount / lastSettleTime / pending_reward_pool / current segment。
- * 3. 本会话不做 stop/flush 完整逻辑，不做正式库存入库。
- * 4. 本会话不做 Controller / 查询接口 / 队列自动消费 / 完整 Redis 丢失恢复。
+ * 3. 本服务不负责 stop/flush 完整逻辑，不做正式库存入库。
+ * 4. 推进前会先做一次运行态兜底恢复，确保 Redis 丢失后仍可继续推进。
  */
 @Service
 public class GatherTaskAdvanceService {
@@ -59,6 +59,11 @@ public class GatherTaskAdvanceService {
     private final GatherTaskSegmentPlanner gatherTaskSegmentPlanner;
 
     /**
+     * 采集任务运行态恢复服务。
+     */
+    private final GatherTaskRuntimeRecoveryService gatherTaskRuntimeRecoveryService;
+
+    /**
      * JSON 编解码器。
      */
     private final ObjectMapper objectMapper;
@@ -71,6 +76,7 @@ public class GatherTaskAdvanceService {
      * @param gatherTaskRewardGenerator 奖励生成器
      * @param gatherTaskPendingRewardAggregator 待刷收益池聚合器
      * @param gatherTaskSegmentPlanner 分段规划器
+     * @param gatherTaskRuntimeRecoveryService 运行态恢复服务
      * @param objectMapper JSON 编解码器
      */
     public GatherTaskAdvanceService(PlayerGatherTaskRepository playerGatherTaskRepository,
@@ -78,12 +84,14 @@ public class GatherTaskAdvanceService {
                                     GatherTaskRewardGenerator gatherTaskRewardGenerator,
                                     GatherTaskPendingRewardAggregator gatherTaskPendingRewardAggregator,
                                     GatherTaskSegmentPlanner gatherTaskSegmentPlanner,
+                                    GatherTaskRuntimeRecoveryService gatherTaskRuntimeRecoveryService,
                                     ObjectMapper objectMapper) {
         this.playerGatherTaskRepository = playerGatherTaskRepository;
         this.playerGatherTaskRedisRepository = playerGatherTaskRedisRepository;
         this.gatherTaskRewardGenerator = gatherTaskRewardGenerator;
         this.gatherTaskPendingRewardAggregator = gatherTaskPendingRewardAggregator;
         this.gatherTaskSegmentPlanner = gatherTaskSegmentPlanner;
+        this.gatherTaskRuntimeRecoveryService = gatherTaskRuntimeRecoveryService;
         this.objectMapper = objectMapper;
     }
 
@@ -106,6 +114,8 @@ public class GatherTaskAdvanceService {
         if (task == null) {
             throw new IllegalArgumentException("采集任务不存在，taskId=" + command.getTaskId());
         }
+
+        gatherTaskRuntimeRecoveryService.recoverHotStateIfNecessary(task);
 
         PlayerGatherTaskRuntimeCache runtimeCache = playerGatherTaskRedisRepository.findRuntimeByTaskId(task.getId());
         GatherTaskSegmentPlanCache segmentPlanCache = playerGatherTaskRedisRepository.findSegmentPlanByTaskId(task.getId());
