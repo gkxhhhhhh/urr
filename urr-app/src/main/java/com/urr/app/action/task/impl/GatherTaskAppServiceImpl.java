@@ -1,13 +1,16 @@
 package com.urr.app.action.task.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.urr.app.action.task.GatherTaskAdvanceService;
 import com.urr.app.action.task.GatherTaskAppService;
 import com.urr.app.action.task.GatherTaskFactory;
 import com.urr.app.action.task.GatherTaskStopService;
 import com.urr.app.action.task.PlayerActionQueueRepository;
 import com.urr.app.action.task.PlayerActionTaskRepository;
+import com.urr.app.action.task.PlayerGatherTaskRedisConverter;
 import com.urr.app.action.task.PlayerGatherTaskRedisRepository;
 import com.urr.app.action.task.PlayerGatherTaskRepository;
+import com.urr.app.action.task.command.AdvanceGatherTaskCommand;
 import com.urr.app.action.task.command.EnqueueGatherTaskCommand;
 import com.urr.app.action.task.command.StartGatherTaskCommand;
 import com.urr.app.action.task.command.StopGatherTaskCommand;
@@ -36,9 +39,10 @@ import java.util.Objects;
  * 采集任务应用服务实现。
  *
  * 说明：
- * 1. 本类负责“开始采集 / 加入队列 / 手动停止当前采集 / 替换当前任务”。
- * 2. 当前已经接入“停止前先懒推进，再 flush pending_reward_pool，再 stop”的最小正式闭环。
- * 3. 当前还没有做查询接口、Controller、前端、完整恢复引擎、完整队列自动消费。
+ * 1. 本类只做“开始采集 / 加入队列 / 停止当前采集任务”的最小编排。
+ * 2. 启动和入队逻辑继续沿用会话 4/5/6/7 已经落地的能力。
+ * 3. 停止当前任务时，直接复用现有 GatherTaskStopService，不重写 stop/flush 闭环。
+ * 4. 当前还没有做队列自动消费。
  */
 @Service
 @RequiredArgsConstructor
@@ -78,6 +82,11 @@ public class GatherTaskAppServiceImpl implements GatherTaskAppService {
      * 采集任务工厂。
      */
     private final GatherTaskFactory gatherTaskFactory;
+
+    /**
+     * 采集任务最小懒推进服务。
+     */
+    private final GatherTaskAdvanceService gatherTaskAdvanceService;
 
     /**
      * 采集任务停止服务。
@@ -145,7 +154,7 @@ public class GatherTaskAppServiceImpl implements GatherTaskAppService {
     }
 
     /**
-     * 手动停止当前运行中的采集任务。
+     * 停止当前运行中的采集任务。
      *
      * @param command 停止命令
      * @return 停止结果
@@ -158,21 +167,17 @@ public class GatherTaskAppServiceImpl implements GatherTaskAppService {
         PlayerEntity player = requireOwnedPlayer(command.getAccountId(), command.getPlayerId());
         PlayerActionTask runningTask = playerActionTaskRepository.findRunningByPlayerId(player.getId());
         if (runningTask == null) {
-            throw new IllegalArgumentException("当前没有运行中的任务");
+            throw new IllegalArgumentException("当前无运行中的采集任务可停止");
         }
         if (!ActionTaskTypeEnum.GATHER.equals(runningTask.getTaskType())) {
-            throw new IllegalArgumentException("当前运行中的不是采集任务");
+            throw new IllegalArgumentException("当前运行中的任务不是采集任务，无法停止");
         }
 
-        LocalDateTime now = LocalDateTime.now();
-        StopGatherTaskResult result = gatherTaskStopService.stopByTaskId(
+        return gatherTaskStopService.stopByTaskId(
                 runningTask.getId(),
                 ActionTaskStopReasonEnum.USER_STOP,
-                now
+                LocalDateTime.now()
         );
-
-        refreshPlayerLastInteractTime(player, now);
-        return result;
     }
 
     /**
@@ -191,16 +196,18 @@ public class GatherTaskAppServiceImpl implements GatherTaskAppService {
         Long replacedTaskId = runningTask.getId();
 
         if (ActionTaskTypeEnum.GATHER.equals(runningTask.getTaskType())) {
-            gatherTaskStopService.stopByTaskId(
-                    replacedTaskId,
-                    ActionTaskStopReasonEnum.USER_REPLACE,
-                    LocalDateTime.now()
-            );
-        } else {
-            playerActionTaskRepository.stopByUserReplace(replacedTaskId);
+            advanceGatherTaskBeforeReplace(replacedTaskId);
         }
 
-        return startNewRunningTask(player, action, targetCount, replacedTaskId);
+        playerActionTaskRepository.stopByUserReplace(replacedTaskId);
+
+        StartGatherTaskResult result = startNewRunningTask(player, action, targetCount, replacedTaskId);
+
+        if (ActionTaskTypeEnum.GATHER.equals(runningTask.getTaskType())) {
+            refreshStoppedGatherHotState(player.getId(), replacedTaskId);
+        }
+
+        return result;
     }
 
     /**
@@ -217,6 +224,7 @@ public class GatherTaskAppServiceImpl implements GatherTaskAppService {
                                                       Long targetCount,
                                                       Long replacedTaskId) {
         LocalDateTime now = LocalDateTime.now();
+
         refreshPlayerLastInteractTime(player, now);
 
         PlayerGatherTask task = gatherTaskFactory.createRunningTask(player, action, targetCount, now);
@@ -233,6 +241,44 @@ public class GatherTaskAppServiceImpl implements GatherTaskAppService {
         result.setQueuePosition(null);
         result.setReplacedTaskId(replacedTaskId);
         return result;
+    }
+
+    /**
+     * 在替换旧采集任务前，先把它推进到当前时刻。
+     *
+     * @param taskId 旧采集任务ID
+     */
+    private void advanceGatherTaskBeforeReplace(Long taskId) {
+        AdvanceGatherTaskCommand advanceCommand = new AdvanceGatherTaskCommand();
+        advanceCommand.setTaskId(taskId);
+        advanceCommand.setAdvanceTime(LocalDateTime.now());
+        gatherTaskAdvanceService.advanceTo(advanceCommand);
+    }
+
+    /**
+     * 刷新被替换采集任务的 Redis 热态。
+     *
+     * 说明：
+     * 1. 运行槽位 / 运行态 / 当前段计划可以删除。
+     * 2. 如果仍有 pending_reward_pool，则继续保留热态镜像，方便后续 flush 前读取。
+     *
+     * @param playerId 玩家ID
+     * @param taskId 任务ID
+     */
+    private void refreshStoppedGatherHotState(Long playerId, Long taskId) {
+        playerGatherTaskRedisRepository.deleteRunningTaskIfMatch(playerId, taskId);
+        playerGatherTaskRedisRepository.deleteRuntime(taskId);
+        playerGatherTaskRedisRepository.deleteSegmentPlan(taskId);
+
+        PlayerGatherTask stoppedTask = playerGatherTaskRepository.findByTaskId(taskId);
+        if (stoppedTask == null || !stoppedTask.hasPendingRewardPool()) {
+            playerGatherTaskRedisRepository.deletePendingRewardPool(taskId);
+            return;
+        }
+
+        playerGatherTaskRedisRepository.savePendingRewardPool(
+                PlayerGatherTaskRedisConverter.toPendingRewardPoolCache(stoppedTask)
+        );
     }
 
     /**
@@ -288,7 +334,7 @@ public class GatherTaskAppServiceImpl implements GatherTaskAppService {
      */
     private void validateStopCommand(StopGatherTaskCommand command) {
         if (command == null) {
-            throw new IllegalArgumentException("停止采集命令不能为空");
+            throw new IllegalArgumentException("停止命令不能为空");
         }
         if (command.getAccountId() == null) {
             throw new IllegalArgumentException("未登录");
@@ -349,6 +395,7 @@ public class GatherTaskAppServiceImpl implements GatherTaskAppService {
                         .eq(ActionDefEntity::getStatus, 1)
                         .last("limit 1")
         );
+
         if (action == null) {
             throw new IllegalArgumentException("动作不存在或未启用");
         }
@@ -358,6 +405,7 @@ public class GatherTaskAppServiceImpl implements GatherTaskAppService {
         if (!StringUtils.hasText(action.getActionCode()) || !action.getActionCode().startsWith("GATHER_")) {
             throw new IllegalArgumentException("当前动作不是采集动作");
         }
+
         return action;
     }
 

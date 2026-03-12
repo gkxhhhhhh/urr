@@ -10,9 +10,9 @@ import com.urr.app.action.task.result.StopGatherTaskResult;
  * 采集任务应用服务。
  *
  * 说明：
- * 1. 这里只编排“立即开始 / 加入队列 / 手动停止”。
- * 2. 当前已经接入“替换旧采集任务前，先做推进 + flush + stop”的最小闭环。
- * 3. 当前仍然不负责查询接口、Controller、前端、完整队列自动消费。
+ * 1. 这里只编排“立即开始 / 加入队列 / 停止当前任务”的最小写能力。
+ * 2. 不负责懒结算细节，不负责完整恢复，不负责自动消费队列。
+ * 3. Controller 只需要调用这里即可。
  */
 public interface GatherTaskAppService {
 
@@ -21,7 +21,7 @@ public interface GatherTaskAppService {
      *
      * 语义：
      * 1. 当前没有运行中任务时，直接启动。
-     * 2. 当前已有运行中任务时，先处理旧任务，再启动新任务。
+     * 2. 当前已有运行中任务时，替换当前任务并启动新的采集任务。
      *
      * @param command 开始采集命令
      * @return 启动结果
@@ -41,12 +41,12 @@ public interface GatherTaskAppService {
     StartGatherTaskResult enqueue(EnqueueGatherTaskCommand command);
 
     /**
-     * 手动停止当前运行中的采集任务。
+     * 停止当前运行中的采集任务。
      *
      * 语义：
-     * 1. 先推进到当前时刻。
-     * 2. 再 flush pending_reward_pool 到正式库存。
-     * 3. 再把任务状态更新为 STOPPED。
+     * 1. 这里按“账号 + 角色”定位当前运行中的任务。
+     * 2. 只允许停止当前运行中的采集任务。
+     * 3. 真正的 stop / flush 闭环仍复用现有停止服务。
      *
      * @param command 停止命令
      * @return 停止结果
