@@ -7,7 +7,6 @@ import com.urr.domain.action.task.PlayerActionQueueEntity;
 import com.urr.infra.mapper.PlayerActionQueueMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Repository;
-import org.springframework.util.StringUtils;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -16,9 +15,9 @@ import java.util.List;
  * 玩家动作队列仓储。
  *
  * 说明：
- * 1. 当前只做最小入队能力。
- * 2. 不负责自动消费队列。
- * 3. 队列顺序使用自增 id 作为最小顺序能力。
+ * 1. 这里只处理最小队列真相层读写。
+ * 2. 队列顺序继续使用自增 id 作为最小顺序能力。
+ * 3. 消费成功后的队列记录，直接删除即可，不额外发明新的“已消费状态”。
  */
 @Repository
 @RequiredArgsConstructor
@@ -48,31 +47,49 @@ public class PlayerActionQueueRepository {
     }
 
     /**
-     * 查询角色当前排队中的记录。
-     *
-     * 说明：
-     * 1. 当前主要给采集读接口使用。
-     * 2. taskType 为空时表示读取全部业务类型；有值时按业务类型过滤。
-     * 3. 结果按自增 id 正序返回，对应最小队列顺序语义。
+     * 查询角色当前排队中的指定任务类型列表。
      *
      * @param playerId 玩家ID
      * @param taskType 任务类型
-     * @return 队列记录列表
+     * @return 队列列表
      */
     public List<PlayerActionQueueEntity> findQueuedByPlayerIdAndTaskType(Long playerId, ActionTaskTypeEnum taskType) {
-        if (playerId == null) {
-            return new ArrayList<PlayerActionQueueEntity>();
+        List<PlayerActionQueueEntity> result = new ArrayList<>();
+        if (playerId == null || taskType == null) {
+            return result;
         }
-
-        LambdaQueryWrapper<PlayerActionQueueEntity> queryWrapper = new LambdaQueryWrapper<PlayerActionQueueEntity>()
-                .eq(PlayerActionQueueEntity::getPlayerId, playerId)
-                .eq(PlayerActionQueueEntity::getStatus, ActionTaskStatusEnum.QUEUED.getCode())
-                .orderByAsc(PlayerActionQueueEntity::getId);
-
-        if (taskType != null && StringUtils.hasText(taskType.getCode())) {
-            queryWrapper.eq(PlayerActionQueueEntity::getTaskType, taskType.getCode());
+        List<PlayerActionQueueEntity> entityList = playerActionQueueMapper.selectList(
+                new LambdaQueryWrapper<PlayerActionQueueEntity>()
+                        .eq(PlayerActionQueueEntity::getPlayerId, playerId)
+                        .eq(PlayerActionQueueEntity::getTaskType, taskType.getCode())
+                        .eq(PlayerActionQueueEntity::getStatus, ActionTaskStatusEnum.QUEUED.getCode())
+                        .orderByAsc(PlayerActionQueueEntity::getId)
+        );
+        if (entityList == null) {
+            return result;
         }
-        return playerActionQueueMapper.selectList(queryWrapper);
+        return entityList;
+    }
+
+    /**
+     * 查询角色当前排队中的第一条指定任务类型记录。
+     *
+     * @param playerId 玩家ID
+     * @param taskType 任务类型
+     * @return 队头记录，不存在时返回 null
+     */
+    public PlayerActionQueueEntity findFirstQueuedByPlayerIdAndTaskType(Long playerId, ActionTaskTypeEnum taskType) {
+        if (playerId == null || taskType == null) {
+            return null;
+        }
+        return playerActionQueueMapper.selectOne(
+                new LambdaQueryWrapper<PlayerActionQueueEntity>()
+                        .eq(PlayerActionQueueEntity::getPlayerId, playerId)
+                        .eq(PlayerActionQueueEntity::getTaskType, taskType.getCode())
+                        .eq(PlayerActionQueueEntity::getStatus, ActionTaskStatusEnum.QUEUED.getCode())
+                        .orderByAsc(PlayerActionQueueEntity::getId)
+                        .last("limit 1")
+        );
     }
 
     /**
@@ -86,6 +103,25 @@ public class PlayerActionQueueRepository {
         if (rows != 1) {
             throw new IllegalStateException("保存动作队列失败");
         }
+    }
+
+    /**
+     * 删除一条仍处于 QUEUED 的队列记录。
+     *
+     * @param playerId 玩家ID
+     * @param queueId 队列ID
+     * @return 删除行数
+     */
+    public int deleteQueuedById(Long playerId, Long queueId) {
+        if (playerId == null || queueId == null) {
+            return 0;
+        }
+        return playerActionQueueMapper.delete(
+                new LambdaQueryWrapper<PlayerActionQueueEntity>()
+                        .eq(PlayerActionQueueEntity::getId, queueId)
+                        .eq(PlayerActionQueueEntity::getPlayerId, playerId)
+                        .eq(PlayerActionQueueEntity::getStatus, ActionTaskStatusEnum.QUEUED.getCode())
+        );
     }
 
     /**

@@ -7,6 +7,7 @@ import com.urr.domain.action.task.ActionTaskStatusEnum;
 import com.urr.domain.action.task.ActionTaskStopReasonEnum;
 import com.urr.domain.action.task.PlayerGatherTask;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -17,9 +18,10 @@ import java.time.LocalDateTime;
  *
  * 说明：
  * 1. 这里承接 stop / replace 共用的最小闭环。
- * 2. 顺序固定为：先恢复，再 advance，再 flush，再 stop，再清 Redis 热态。
- * 3. 当前不负责自动消费队列下一个任务。
+ * 2. 顺序固定为：先 advance，再 flush，再 stop，再清 Redis 热态。
+ * 3. 本次在 stop 收口后，补“尝试自动拉起队列下一条”的最小闭环。
  */
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class GatherTaskStopService {
@@ -45,9 +47,9 @@ public class GatherTaskStopService {
     private final GatherTaskPendingRewardFlushService gatherTaskPendingRewardFlushService;
 
     /**
-     * 采集任务运行态恢复服务。
+     * 队列自动拉起服务。
      */
-    private final GatherTaskRuntimeRecoveryService gatherTaskRuntimeRecoveryService;
+    private final GatherTaskQueueAutoStartService gatherTaskQueueAutoStartService;
 
     /**
      * 停止一条采集任务。
@@ -58,15 +60,15 @@ public class GatherTaskStopService {
      * @return 停止结果
      */
     @Transactional(rollbackFor = Exception.class)
-    public StopGatherTaskResult stopByTaskId(Long taskId, ActionTaskStopReasonEnum stopReason, LocalDateTime stopTime) {
+    public StopGatherTaskResult stopByTaskId(Long taskId,
+                                             ActionTaskStopReasonEnum stopReason,
+                                             LocalDateTime stopTime) {
         validateInput(taskId, stopReason);
 
         LocalDateTime operateTime = stopTime == null ? LocalDateTime.now() : stopTime;
         PlayerGatherTask task = requireRunningTask(taskId);
 
-        gatherTaskRuntimeRecoveryService.recoverHotStateIfNecessary(task);
         advanceToCurrentTime(task.getId(), operateTime);
-
         PendingRewardFlushResult flushResult = gatherTaskPendingRewardFlushService.flushPendingReward(task.getId());
 
         PlayerGatherTask latestTask = playerGatherTaskRepository.findByTaskId(task.getId());
@@ -80,6 +82,8 @@ public class GatherTaskStopService {
         playerGatherTaskRepository.update(latestTask);
 
         playerGatherTaskRedisRepository.deleteTaskHotState(latestTask.getPlayerId(), latestTask.getId());
+        safeTryStartNextQueuedTask(latestTask.getPlayerId(), stopReason);
+
         return buildResult(latestTask, flushResult, operateTime);
     }
 
@@ -121,7 +125,9 @@ public class GatherTaskStopService {
      * @param stopTime 停止时间
      * @return 停止结果
      */
-    private StopGatherTaskResult buildResult(PlayerGatherTask task, PendingRewardFlushResult flushResult, LocalDateTime stopTime) {
+    private StopGatherTaskResult buildResult(PlayerGatherTask task,
+                                             PendingRewardFlushResult flushResult,
+                                             LocalDateTime stopTime) {
         StopGatherTaskResult result = new StopGatherTaskResult();
         result.setTaskId(task.getId());
         result.setPlayerId(task.getPlayerId());
@@ -149,5 +155,36 @@ public class GatherTaskStopService {
         if (stopReason == null) {
             throw new IllegalArgumentException("stopReason不能为空");
         }
+    }
+
+    /**
+     * 安全尝试自动拉起下一条队列任务。
+     *
+     * 说明：
+     * 1. USER_REPLACE 不自动消费队列，因为替换路径本身会立即启动新任务。
+     * 2. 自动拉起失败时，不影响本次 stop 已经成功。
+     *
+     * @param playerId 玩家ID
+     * @param stopReason 停止原因
+     */
+    private void safeTryStartNextQueuedTask(Long playerId, ActionTaskStopReasonEnum stopReason) {
+        if (!shouldAutoStartNextTask(stopReason)) {
+            return;
+        }
+        try {
+            gatherTaskQueueAutoStartService.tryStartNextQueuedTask(playerId);
+        } catch (Exception e) {
+            log.warn("停止采集任务后自动拉起下一队列任务失败，playerId={}, stopReason={}", playerId, stopReason, e);
+        }
+    }
+
+    /**
+     * 判断当前停止原因是否允许自动拉起下一条任务。
+     *
+     * @param stopReason 停止原因
+     * @return true-允许自动拉起，false-不允许
+     */
+    private boolean shouldAutoStartNextTask(ActionTaskStopReasonEnum stopReason) {
+        return !ActionTaskStopReasonEnum.USER_REPLACE.equals(stopReason);
     }
 }

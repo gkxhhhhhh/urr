@@ -5,27 +5,29 @@ import com.urr.domain.action.task.PlayerActionTask;
 import com.urr.domain.action.task.PlayerGatherTask;
 import com.urr.domain.action.task.PlayerRunningTaskCache;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 /**
  * 采集任务运行态恢复服务。
  *
  * 说明：
- * 1. 这里只做“数据库真相层 -> Redis 热态层”的按需恢复。
- * 2. 不负责推进、不负责停止、不负责 flush。
- * 3. 只恢复当前运行中的采集任务，不处理队列自动消费。
+ * 1. 这里只负责 DB -> Redis 热态恢复，以及“无当前运行任务时的队列兜底拉起”。
+ * 2. 不负责 advance / flush / stop。
+ * 3. 当前只处理采集任务，不扩散到其他任务类型。
  */
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class GatherTaskRuntimeRecoveryService {
 
     /**
-     * 动作任务根表仓储。
+     * 动作根任务仓储。
      */
     private final PlayerActionTaskRepository playerActionTaskRepository;
 
     /**
-     * 采集任务数据库真相层仓储。
+     * 采集任务仓储。
      */
     private final PlayerGatherTaskRepository playerGatherTaskRepository;
 
@@ -35,10 +37,19 @@ public class GatherTaskRuntimeRecoveryService {
     private final PlayerGatherTaskRedisRepository playerGatherTaskRedisRepository;
 
     /**
-     * 按玩家ID恢复当前运行中的采集任务热态。
+     * 队列自动拉起服务。
+     */
+    private final GatherTaskQueueAutoStartService gatherTaskQueueAutoStartService;
+
+    /**
+     * 按玩家ID恢复当前运行中的采集任务。
+     *
+     * 说明：
+     * 1. 如果 DB 里有运行中的采集任务，则恢复其 Redis 热态并返回。
+     * 2. 如果 DB 里没有运行中的任务，但队列里有待运行采集任务，则尝试兜底拉起队头任务。
      *
      * @param playerId 玩家ID
-     * @return 当前运行中的采集任务，不存在时返回 null
+     * @return 当前运行中的采集任务；不存在时返回 null
      */
     public PlayerGatherTask recoverRunningTaskByPlayerId(Long playerId) {
         if (playerId == null) {
@@ -47,133 +58,83 @@ public class GatherTaskRuntimeRecoveryService {
 
         PlayerActionTask runningTask = playerActionTaskRepository.findRunningByPlayerId(playerId);
         if (runningTask == null) {
-            return null;
+            return safeTryStartNextQueuedTask(playerId);
         }
         if (!ActionTaskTypeEnum.GATHER.equals(runningTask.getTaskType())) {
             return null;
         }
 
-        return recoverRunningTaskByTaskId(runningTask.getId());
-    }
-
-    /**
-     * 按任务ID恢复当前运行中的采集任务热态。
-     *
-     * @param taskId 任务ID
-     * @return 当前运行中的采集任务，不存在时返回 null
-     */
-    public PlayerGatherTask recoverRunningTaskByTaskId(Long taskId) {
-        if (taskId == null) {
+        PlayerGatherTask gatherTask = playerGatherTaskRepository.findByTaskId(runningTask.getId());
+        if (gatherTask == null) {
             return null;
         }
 
-        PlayerGatherTask task = playerGatherTaskRepository.findByTaskId(taskId);
-        if (task == null) {
-            return null;
-        }
-
-        recoverHotStateIfNecessary(task);
-        return task;
+        recoverHotStateIfNecessary(gatherTask);
+        return gatherTask;
     }
 
     /**
-     * 当 Redis 热态缺失时，按数据库真相层恢复当前任务热态。
+     * 在 Redis 热态缺失时，按任务镜像最小恢复热态。
      *
      * @param task 采集任务
-     * @return true-执行了恢复，false-无需恢复
      */
-    public boolean recoverHotStateIfNecessary(PlayerGatherTask task) {
-        if (!canRecover(task)) {
-            return false;
+    public void recoverHotStateIfNecessary(PlayerGatherTask task) {
+        if (task == null) {
+            return;
         }
-
-        if (!isRunningSlotMissing(task)
-                && !isRuntimeMissing(task)
-                && !isSegmentMissing(task)
-                && !isPendingRewardPoolMissing(task)) {
-            return false;
+        if (!task.isRunning()) {
+            return;
         }
-
+        if (!shouldRecoverHotState(task)) {
+            return;
+        }
         playerGatherTaskRedisRepository.saveTaskHotState(task);
-        return true;
     }
 
     /**
-     * 判断当前任务是否满足恢复条件。
+     * 判断当前任务是否需要恢复 Redis 热态。
      *
      * @param task 采集任务
-     * @return true-可恢复，false-不可恢复
+     * @return true-需要恢复，false-无需恢复
      */
-    private boolean canRecover(PlayerGatherTask task) {
-        if (task == null) {
-            return false;
-        }
-        if (task.getId() == null) {
-            return false;
-        }
-        if (task.getPlayerId() == null) {
-            return false;
-        }
-        return task.isRunning();
-    }
-
-    /**
-     * 判断当前运行槽位是否缺失。
-     *
-     * @param task 采集任务
-     * @return true-缺失，false-存在
-     */
-    private boolean isRunningSlotMissing(PlayerGatherTask task) {
-        PlayerRunningTaskCache cache = playerGatherTaskRedisRepository.findRunningTaskByPlayerId(task.getPlayerId());
-        if (cache == null) {
+    private boolean shouldRecoverHotState(PlayerGatherTask task) {
+        PlayerRunningTaskCache runningTaskCache =
+                playerGatherTaskRedisRepository.findRunningTaskByPlayerId(task.getPlayerId());
+        if (runningTaskCache == null) {
             return true;
         }
-        if (!task.getId().equals(cache.getTaskId())) {
+        if (!task.getId().equals(runningTaskCache.getTaskId())) {
             return true;
         }
-        return !cache.isGatherTask();
-    }
-
-    /**
-     * 判断采集运行态是否缺失。
-     *
-     * @param task 采集任务
-     * @return true-缺失，false-存在
-     */
-    private boolean isRuntimeMissing(PlayerGatherTask task) {
-        return playerGatherTaskRedisRepository.findRuntimeByTaskId(task.getId()) == null;
-    }
-
-    /**
-     * 判断当前 segment plan 是否缺失。
-     *
-     * @param task 采集任务
-     * @return true-缺失，false-存在
-     */
-    private boolean isSegmentMissing(PlayerGatherTask task) {
-        boolean shouldHaveSegment =
-                (task.getCurrentSegmentStart() != null && task.getCurrentSegmentEnd() != null)
-                        || task.hasLockedRewardPlan();
-
-        if (!shouldHaveSegment) {
-            return false;
+        if (!runningTaskCache.isGatherTask()) {
+            return true;
         }
-
-        return playerGatherTaskRedisRepository.findSegmentPlanByTaskId(task.getId()) == null;
+        if (playerGatherTaskRedisRepository.findRuntimeByTaskId(task.getId()) == null) {
+            return true;
+        }
+        if (task.hasLockedRewardPlan()
+                && playerGatherTaskRedisRepository.findSegmentPlanByTaskId(task.getId()) == null) {
+            return true;
+        }
+        if ((task.hasPendingRewardPool() || task.hasPendingRewardToFlush())
+                && playerGatherTaskRedisRepository.findPendingRewardPoolByTaskId(task.getId()) == null) {
+            return true;
+        }
+        return false;
     }
 
     /**
-     * 判断 pending_reward_pool 是否缺失。
+     * 安全尝试拉起下一条队列任务。
      *
-     * @param task 采集任务
-     * @return true-缺失，false-存在
+     * @param playerId 玩家ID
+     * @return 新拉起的采集任务；没有拉起时返回 null
      */
-    private boolean isPendingRewardPoolMissing(PlayerGatherTask task) {
-        boolean shouldHavePending = task.hasPendingRewardPool() || task.hasPendingRewardToFlush();
-        if (!shouldHavePending) {
-            return false;
+    private PlayerGatherTask safeTryStartNextQueuedTask(Long playerId) {
+        try {
+            return gatherTaskQueueAutoStartService.tryStartNextQueuedTask(playerId);
+        } catch (Exception e) {
+            log.warn("恢复场景下自动拉起下一队列任务失败，playerId={}", playerId, e);
+            return null;
         }
-
-        return playerGatherTaskRedisRepository.findPendingRewardPoolByTaskId(task.getId()) == null;
     }
 }

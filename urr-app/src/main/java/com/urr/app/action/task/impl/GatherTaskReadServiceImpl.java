@@ -3,6 +3,7 @@ package com.urr.app.action.task.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.urr.app.action.task.GatherTaskFinishService;
 import com.urr.app.action.task.GatherTaskAdvanceService;
 import com.urr.app.action.task.GatherTaskReadService;
 import com.urr.app.action.task.GatherTaskRuntimeRecoveryService;
@@ -36,6 +37,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
+
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -124,7 +126,10 @@ public class GatherTaskReadServiceImpl implements GatherTaskReadService {
      * 视图组装器。
      */
     private final GatherTaskViewAssembler gatherTaskViewAssembler;
-
+    /**
+     * 采集任务完成收口服务。
+     */
+    private final GatherTaskFinishService gatherTaskFinishService;
     /**
      * 查询采集面板最小视图。
      *
@@ -199,8 +204,9 @@ public class GatherTaskReadServiceImpl implements GatherTaskReadService {
      *
      * 说明：
      * 1. 只有当前运行任务确实是 GATHER 时，才会进入采集读链路。
-     * 2. 查询前先做一次最小热态恢复，确保 Redis 丢失后仍可继续读。
+     * 2. 查询前先做一次最小热态恢复；如果当前没有运行任务，则尝试从队列兜底拉起下一条。
      * 3. 读之前会做一次非常克制的最小 advance，确保进度 / pending 展示尽量接近当前时刻。
+     * 4. 如果 advance 后发现任务已经达到目标轮次，则在这里收口完成态，并切到新的当前运行任务。
      *
      * @param playerId 角色ID
      * @param readTime 读取时刻
@@ -209,8 +215,13 @@ public class GatherTaskReadServiceImpl implements GatherTaskReadService {
     private PlayerGatherTask loadCurrentRunningGatherTask(Long playerId, LocalDateTime readTime) {
         PlayerActionTask runningTask = playerActionTaskRepository.findRunningByPlayerId(playerId);
         if (runningTask == null) {
-            return null;
+            PlayerGatherTask recoveredTask = gatherTaskRuntimeRecoveryService.recoverRunningTaskByPlayerId(playerId);
+            if (recoveredTask == null) {
+                return null;
+            }
+            runningTask = recoveredTask;
         }
+
         if (!ActionTaskTypeEnum.GATHER.equals(runningTask.getTaskType())) {
             return null;
         }
@@ -227,7 +238,26 @@ public class GatherTaskReadServiceImpl implements GatherTaskReadService {
         command.setAdvanceTime(readTime);
         gatherTaskAdvanceService.advanceTo(command);
 
-        return playerGatherTaskRepository.findByTaskId(gatherTask.getId());
+        PlayerGatherTask latestTask = playerGatherTaskRepository.findByTaskId(gatherTask.getId());
+        if (latestTask != null
+                && latestTask.isRunning()
+                && latestTask.isFinishedByTargetCount()) {
+            gatherTaskFinishService.finishIfReachedTarget(latestTask.getId(), readTime);
+            latestTask = playerGatherTaskRepository.findByTaskId(gatherTask.getId());
+        }
+
+        if (latestTask != null && latestTask.isRunning()) {
+            return latestTask;
+        }
+
+        PlayerActionTask latestRunningTask = playerActionTaskRepository.findRunningByPlayerId(playerId);
+        if (latestRunningTask == null) {
+            return null;
+        }
+        if (!ActionTaskTypeEnum.GATHER.equals(latestRunningTask.getTaskType())) {
+            return null;
+        }
+        return playerGatherTaskRepository.findByTaskId(latestRunningTask.getId());
     }
 
     /**
