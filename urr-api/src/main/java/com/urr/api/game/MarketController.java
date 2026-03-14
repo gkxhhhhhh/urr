@@ -47,6 +47,18 @@ public class MarketController {
     }
 
     /**
+     * 查询可交易商品目录。
+     *
+     * @param playerId 玩家ID
+     * @return 商品目录
+     */
+    @GetMapping("/items")
+    public ResponseData queryItems(Long playerId) {
+        Long accountId = AuthRequired.requireAccountId();
+        return ResponseData.success(marketAppService.queryTradableItems(accountId, playerId));
+    }
+
+    /**
      * 查询市场列表。
      *
      * @param request 查询请求
@@ -60,6 +72,7 @@ public class MarketController {
                         accountId,
                         request.getPlayerId(),
                         request.getOrderType(),
+                        request.getItemId(),
                         request.getPageNo(),
                         request.getPageSize()
                 )
@@ -129,16 +142,13 @@ public class MarketController {
      * @return 成交结果
      */
     @PostMapping("/sell-orders/{orderId}/buy")
-    public ResponseData buySellOrder(@PathVariable("orderId") @Positive(message = "orderId必须大于0") Long orderId,
-                                     @RequestBody @Valid MarketTradeRequest request) {
+    public ResponseData buySellOrder(
+            @PathVariable("orderId") @Positive(message = "orderId必须大于0") Long orderId,
+            @RequestBody @Valid MarketTradeRequest request
+    ) {
         Long accountId = AuthRequired.requireAccountId();
         return ResponseData.success(
-                marketAppService.buySellOrder(
-                        accountId,
-                        request.getPlayerId(),
-                        orderId,
-                        request.getQty()
-                )
+                marketAppService.buySellOrder(accountId, request.getPlayerId(), orderId, request.getQty())
         );
     }
 
@@ -171,16 +181,13 @@ public class MarketController {
      * @return 成交结果
      */
     @PostMapping("/buy-orders/{orderId}/sell")
-    public ResponseData sellToBuyOrder(@PathVariable("orderId") @Positive(message = "orderId必须大于0") Long orderId,
-                                       @RequestBody @Valid MarketTradeRequest request) {
+    public ResponseData sellToBuyOrder(
+            @PathVariable("orderId") @Positive(message = "orderId必须大于0") Long orderId,
+            @RequestBody @Valid MarketTradeRequest request
+    ) {
         Long accountId = AuthRequired.requireAccountId();
         return ResponseData.success(
-                marketAppService.sellToBuyOrder(
-                        accountId,
-                        request.getPlayerId(),
-                        orderId,
-                        request.getQty()
-                )
+                marketAppService.sellToBuyOrder(accountId, request.getPlayerId(), orderId, request.getQty())
         );
     }
 
@@ -192,15 +199,11 @@ public class MarketController {
      * @return 取消结果
      */
     @PostMapping("/orders/{orderId}/cancel")
-    public ResponseData cancelOrder(@PathVariable("orderId") @Positive(message = "orderId必须大于0") Long orderId,
-                                    @RequestBody @Valid CancelMarketOrderRequest request) {
+    public ResponseData cancelOrder(
+            @PathVariable("orderId") @Positive(message = "orderId必须大于0") Long orderId,
+            @RequestBody @Valid CancelMarketOrderRequest request
+    ) {
         Long accountId = AuthRequired.requireAccountId();
-        return ResponseData.success(
-                marketAppService.cancelOrder(
-                        accountId,
-                        request.getPlayerId(),
-                        orderId
-                )
-        );
+        return ResponseData.success(marketAppService.cancelOrder(accountId, request.getPlayerId(), orderId));
     }
 }

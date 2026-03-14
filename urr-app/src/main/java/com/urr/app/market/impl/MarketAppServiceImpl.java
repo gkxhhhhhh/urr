@@ -12,6 +12,8 @@ import com.urr.app.market.result.MarketOrderView;
 import com.urr.app.market.result.MarketTradePageResult;
 import com.urr.app.market.result.MarketTradeResult;
 import com.urr.app.market.result.MarketTradeView;
+import com.urr.app.market.result.MarketItemCatalogResult;
+import com.urr.app.market.result.MarketItemCatalogView;
 import com.urr.domain.item.ItemDefEntity;
 import com.urr.domain.item.PlayerItemStackEntity;
 import com.urr.domain.market.MarketOrderEntity;
@@ -149,6 +151,42 @@ public class MarketAppServiceImpl implements MarketAppService {
         return result;
     }
 
+
+    @Override
+    public MarketItemCatalogResult queryTradableItems(Long accountId, Long playerId) {
+        PlayerEntity player = loadPlayer(accountId, playerId);
+
+        LambdaQueryWrapper<ItemDefEntity> query = new LambdaQueryWrapper<>();
+        query.eq(ItemDefEntity::getTradeable, 1);
+        query.eq(ItemDefEntity::getStackable, 1);
+        query.and(wrapper -> wrapper.isNull(ItemDefEntity::getBindType).or().eq(ItemDefEntity::getBindType, 0));
+        query.orderByAsc(ItemDefEntity::getItemType)
+                .orderByAsc(ItemDefEntity::getId);
+
+        List<ItemDefEntity> items = itemDefMapper.selectList(query);
+        List<MarketItemCatalogView> resultList = new ArrayList<>();
+        for (int i = 0; i < items.size(); i++) {
+            ItemDefEntity item = items.get(i);
+            if (!canTradeInMarket(item)) {
+                continue;
+            }
+
+            MarketItemCatalogView view = new MarketItemCatalogView();
+            view.setItemId(item.getId());
+            view.setItemCode(item.getItemCode());
+            view.setItemName(item.getNameZh());
+            view.setItemType(item.getItemType());
+            view.setRarity(item.getRarity());
+            view.setMetaJson(item.getMetaJson());
+            resultList.add(view);
+        }
+
+        MarketItemCatalogResult result = new MarketItemCatalogResult();
+        result.setCount((long) resultList.size());
+        result.setList(resultList);
+        return result;
+    }
+
     /**
      * 查询市场列表。
      *
@@ -160,7 +198,7 @@ public class MarketAppServiceImpl implements MarketAppService {
      * @return 市场分页结果
      */
     @Override
-    public MarketOrderPageResult queryMarketOrders(Long accountId, Long playerId, String orderTypeCode, Integer pageNo, Integer pageSize) {
+    public MarketOrderPageResult queryMarketOrders(Long accountId, Long playerId, String orderTypeCode, Long itemId, Integer pageNo, Integer pageSize) {
         PlayerEntity player = loadPlayer(accountId, playerId);
         MarketOrderTypeEnum orderType = requireOrderType(orderTypeCode);
 
@@ -176,7 +214,10 @@ public class MarketAppServiceImpl implements MarketAppService {
         query.and(wrapper -> wrapper.isNull(MarketOrderEntity::getExpireTime)
                 .or()
                 .gt(MarketOrderEntity::getExpireTime, LocalDateTime.now()));
-
+        if (itemId != null) {
+            validatePositive(itemId, "itemId必须大于0");
+            query.eq(MarketOrderEntity::getItemId, itemId);
+        }
         if (MarketOrderTypeEnum.SELL.equals(orderType)) {
             query.orderByAsc(MarketOrderEntity::getPriceEach)
                     .orderByAsc(MarketOrderEntity::getCreateTime);

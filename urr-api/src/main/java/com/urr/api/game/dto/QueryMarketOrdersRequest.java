@@ -4,6 +4,7 @@ import lombok.Data;
 
 import javax.validation.constraints.NotBlank;
 import javax.validation.constraints.NotNull;
+import javax.validation.constraints.Positive;
 
 /**
  * 查询市场订单请求。
@@ -22,6 +23,12 @@ public class QueryMarketOrdersRequest {
      */
     @NotBlank(message = "orderType不能为空")
     private String orderType;
+
+    /**
+     * 物品ID。
+     */
+    @Positive(message = "itemId必须大于0")
+    private Long itemId;
 
     /**
      * 页码。

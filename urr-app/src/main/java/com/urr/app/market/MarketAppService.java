@@ -3,6 +3,7 @@ package com.urr.app.market;
 import com.urr.app.market.result.MarketCancelOrderResult;
 import com.urr.app.market.result.MarketCreateOrderResult;
 import com.urr.app.market.result.MarketInventoryResult;
+import com.urr.app.market.result.MarketItemCatalogResult;
 import com.urr.app.market.result.MarketOrderPageResult;
 import com.urr.app.market.result.MarketTradePageResult;
 import com.urr.app.market.result.MarketTradeResult;
@@ -22,6 +23,15 @@ public interface MarketAppService {
     MarketInventoryResult queryTradableInventory(Long accountId, Long playerId);
 
     /**
+     * 查询可交易商品目录。
+     *
+     * @param accountId 账号ID
+     * @param playerId 玩家ID
+     * @return 商品目录
+     */
+    MarketItemCatalogResult queryTradableItems(Long accountId, Long playerId);
+
+    /**
      * 查询市场列表。
      *
      * @param accountId 账号ID
@@ -31,7 +41,7 @@ public interface MarketAppService {
      * @param pageSize 页大小
      * @return 分页结果
      */
-    MarketOrderPageResult queryMarketOrders(Long accountId, Long playerId, String orderTypeCode, Integer pageNo, Integer pageSize);
+    MarketOrderPageResult queryMarketOrders(Long accountId, Long playerId, String orderTypeCode, Long itemId, Integer pageNo, Integer pageSize);
 
     /**
      * 查询我的订单。
