@@ -28,6 +28,8 @@ import com.urr.infra.mapper.PlayerItemStackMapper;
 import com.urr.infra.mapper.PlayerMapper;
 import com.urr.infra.mapper.WalletFlowMapper;
 import com.urr.infra.mapper.WalletMapper;
+import com.urr.commons.exception.BizException;
+import com.urr.commons.exception.ErrorCode;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -267,6 +269,7 @@ public class MarketAppServiceImpl implements MarketAppService {
     public MarketCreateOrderResult createSellOrder(Long accountId, Long playerId, Long itemId, Long qty, Long priceEach, Long expireMinutes) {
         validatePositive(qty, "卖单数量必须大于0");
         validatePositive(priceEach, "卖单单价必须大于0");
+        validateOptionalPositive(expireMinutes, "过期分钟数必须大于0");
 
         PlayerEntity player = loadPlayer(accountId, playerId);
         ItemDefEntity itemDef = loadTradableItem(itemId);
@@ -322,10 +325,10 @@ public class MarketAppServiceImpl implements MarketAppService {
         ensureOpenOrder(order, MarketOrderTypeEnum.SELL, buyer.getServerId());
 
         if (buyer.getId().equals(order.getSellerId())) {
-            throw new IllegalArgumentException("不能购买自己的卖单");
+            throwConflict("不能购买自己的卖单");
         }
         if (qty.longValue() > order.getQtyRemain().longValue()) {
-            throw new IllegalArgumentException("购买数量超过剩余数量");
+            throwConflict("购买数量超过剩余数量");
         }
 
         Long totalAmount = safeMultiply(qty, order.getPriceEach());
@@ -364,6 +367,7 @@ public class MarketAppServiceImpl implements MarketAppService {
     public MarketCreateOrderResult createBuyOrder(Long accountId, Long playerId, Long itemId, Long qty, Long priceEach, Long expireMinutes) {
         validatePositive(qty, "求购数量必须大于0");
         validatePositive(priceEach, "求购单价必须大于0");
+        validateOptionalPositive(expireMinutes, "过期分钟数必须大于0");
 
         PlayerEntity buyer = loadPlayer(accountId, playerId);
         ItemDefEntity itemDef = loadTradableItem(itemId);
@@ -419,10 +423,10 @@ public class MarketAppServiceImpl implements MarketAppService {
         ensureOpenOrder(order, MarketOrderTypeEnum.BUY, seller.getServerId());
 
         if (seller.getId().equals(order.getBuyerId())) {
-            throw new IllegalArgumentException("不能卖给自己的买单");
+            throwConflict("不能卖给自己的买单");
         }
         if (qty.longValue() > order.getQtyRemain().longValue()) {
-            throw new IllegalArgumentException("出售数量超过剩余数量");
+            throwConflict("出售数量超过剩余数量");
         }
 
         decreaseStack(seller.getId(), seller.getServerId(), order.getItemId(), BAG_LOCATION, qty);
@@ -463,11 +467,11 @@ public class MarketAppServiceImpl implements MarketAppService {
 
         if (MarketOrderTypeEnum.SELL.equals(orderType)) {
             if (!player.getId().equals(order.getSellerId())) {
-                throw new IllegalArgumentException("只能取消自己的卖单");
+                throwConflict("只能取消自己的订单");
             }
         } else {
             if (!player.getId().equals(order.getBuyerId())) {
-                throw new IllegalArgumentException("只能取消自己的买单");
+                throwConflict("只能取消自己的订单");
             }
         }
 
@@ -489,7 +493,7 @@ public class MarketAppServiceImpl implements MarketAppService {
         order.setStatus(MarketOrderStatusEnum.CANCELLED.getDbValue());
         order.setUpdateUser(SYSTEM_USER);
         if (marketOrderMapper.updateById(order) <= 0) {
-            throw new IllegalStateException("订单状态更新失败，请重试");
+            throwConflict("订单状态已变化，请刷新后重试");
         }
 
         MarketCancelOrderResult result = new MarketCancelOrderResult();
@@ -508,15 +512,13 @@ public class MarketAppServiceImpl implements MarketAppService {
      * @return 玩家
      */
     private PlayerEntity loadPlayer(Long accountId, Long playerId) {
-        if (playerId == null) {
-            throw new IllegalArgumentException("playerId不能为空");
-        }
+        validatePositive(playerId, "playerId必须大于0");
         PlayerEntity player = playerMapper.selectById(playerId);
         if (player == null) {
-            throw new IllegalArgumentException("玩家不存在");
+            throwNotFound("玩家不存在");
         }
         if (!player.getAccountId().equals(accountId)) {
-            throw new IllegalArgumentException("玩家不属于当前账号");
+            throwConflict("玩家不属于当前账号");
         }
         return player;
     }
@@ -528,12 +530,10 @@ public class MarketAppServiceImpl implements MarketAppService {
      * @return 订单
      */
     private MarketOrderEntity loadOrder(Long orderId) {
-        if (orderId == null) {
-            throw new IllegalArgumentException("orderId不能为空");
-        }
+        validatePositive(orderId, "orderId必须大于0");
         MarketOrderEntity order = marketOrderMapper.selectById(orderId);
         if (order == null) {
-            throw new IllegalArgumentException("订单不存在");
+            throwNotFound("订单不存在");
         }
         return order;
     }
@@ -547,17 +547,26 @@ public class MarketAppServiceImpl implements MarketAppService {
      */
     private void ensureOpenOrder(MarketOrderEntity order, MarketOrderTypeEnum orderType, Integer serverId) {
         if (!serverId.equals(order.getServerId())) {
-            throw new IllegalArgumentException("不能跨区服操作订单");
+            throwConflict("订单不属于当前角色所在区服");
         }
         if (orderType.getDbValue() != order.getOrderType()) {
-            throw new IllegalArgumentException("订单类型不匹配");
+            throwParamInvalid("订单类型不匹配");
         }
         if (order.getQtyRemain() == null || order.getQtyRemain().longValue() <= 0L) {
-            throw new IllegalArgumentException("订单已无剩余数量");
+            throwConflict("订单已无剩余数量");
         }
         MarketOrderStatusEnum status = MarketOrderStatusEnum.fromDbValue(order.getStatus());
+        if (MarketOrderStatusEnum.CANCELLED.equals(status)) {
+            throwConflict("订单已取消，请勿重复操作");
+        }
+        if (MarketOrderStatusEnum.COMPLETED.equals(status)) {
+            throwConflict("订单已完成，请刷新后重试");
+        }
+        if (MarketOrderStatusEnum.EXPIRED.equals(status)) {
+            throwConflict("订单已过期，请刷新后重试");
+        }
         if (!MarketOrderStatusEnum.LISTED.equals(status) && !MarketOrderStatusEnum.PARTIAL.equals(status)) {
-            throw new IllegalArgumentException("当前订单状态不可操作");
+            throwConflict("当前订单状态不可操作");
         }
     }
 
@@ -594,7 +603,7 @@ public class MarketAppServiceImpl implements MarketAppService {
         order.setStatus(MarketOrderStatusEnum.EXPIRED.getDbValue());
         order.setUpdateUser(SYSTEM_USER);
         if (marketOrderMapper.updateById(order) <= 0) {
-            throw new IllegalStateException("订单过期处理失败，请重试");
+            throwConflict("订单状态已变化，请刷新后重试");
         }
     }
 
@@ -614,7 +623,7 @@ public class MarketAppServiceImpl implements MarketAppService {
         }
         order.setUpdateUser(SYSTEM_USER);
         if (marketOrderMapper.updateById(order) <= 0) {
-            throw new IllegalStateException("订单更新失败，请重试");
+            throwConflict("订单状态已变化，请刷新后重试");
         }
     }
 
@@ -655,12 +664,13 @@ public class MarketAppServiceImpl implements MarketAppService {
      * @return 物品定义
      */
     private ItemDefEntity loadTradableItem(Long itemId) {
-        if (itemId == null) {
-            throw new IllegalArgumentException("itemId不能为空");
-        }
+        validatePositive(itemId, "itemId必须大于0");
         ItemDefEntity itemDef = itemDefMapper.selectById(itemId);
+        if (itemDef == null) {
+            throwNotFound("物品不存在");
+        }
         if (!canTradeInMarket(itemDef)) {
-            throw new IllegalArgumentException("该物品当前不允许进入市场");
+            throwConflict("该物品当前不允许进入市场");
         }
         return itemDef;
     }
@@ -696,13 +706,13 @@ public class MarketAppServiceImpl implements MarketAppService {
     private void decreaseStack(Long playerId, Integer serverId, Long itemId, Integer location, Long qty) {
         PlayerItemStackEntity stack = findStack(playerId, serverId, itemId, location);
         if (stack == null || stack.getQty() == null || stack.getQty().longValue() < qty.longValue()) {
-            throw new IllegalArgumentException("库存数量不足");
+            throwConflict("库存不足");
         }
 
         stack.setQty(stack.getQty() - qty);
         stack.setUpdateUser(SYSTEM_USER);
         if (playerItemStackMapper.updateById(stack) <= 0) {
-            throw new IllegalStateException("库存更新失败，请重试");
+            throwConflict("库存已变化，请刷新后重试");
         }
     }
 
@@ -733,7 +743,7 @@ public class MarketAppServiceImpl implements MarketAppService {
         stack.setQty(stack.getQty() + qty);
         stack.setUpdateUser(SYSTEM_USER);
         if (playerItemStackMapper.updateById(stack) <= 0) {
-            throw new IllegalStateException("库存更新失败，请重试");
+            throwConflict("库存已变化，请刷新后重试");
         }
     }
 
@@ -768,13 +778,13 @@ public class MarketAppServiceImpl implements MarketAppService {
     private void deductWallet(Long playerId, Integer serverId, Long amount, String reason, String refType, Long refId) {
         WalletEntity wallet = requireWallet(playerId, serverId);
         if (wallet.getBalance() == null || wallet.getBalance().longValue() < amount.longValue()) {
-            throw new IllegalArgumentException("金币不足");
+            throwConflict("金币不足");
         }
 
         wallet.setBalance(wallet.getBalance() - amount);
         wallet.setUpdateUser(SYSTEM_USER);
         if (walletMapper.updateById(wallet) <= 0) {
-            throw new IllegalStateException("钱包更新失败，请重试");
+            throwConflict("余额已变化，请刷新后重试");
         }
 
         insertWalletFlow(playerId, serverId, -amount, wallet.getBalance(), reason, refType, refId);
@@ -808,7 +818,7 @@ public class MarketAppServiceImpl implements MarketAppService {
         wallet.setBalance(wallet.getBalance() + amount);
         wallet.setUpdateUser(SYSTEM_USER);
         if (walletMapper.updateById(wallet) <= 0) {
-            throw new IllegalStateException("钱包更新失败，请重试");
+            throwConflict("余额已变化，请刷新后重试");
         }
 
         insertWalletFlow(playerId, serverId, amount, wallet.getBalance(), reason, refType, refId);
@@ -839,7 +849,7 @@ public class MarketAppServiceImpl implements MarketAppService {
     private WalletEntity requireWallet(Long playerId, Integer serverId) {
         WalletEntity wallet = findWallet(playerId, serverId);
         if (wallet == null) {
-            throw new IllegalArgumentException("钱包不存在");
+            throwConflict("金币不足");
         }
         return wallet;
     }
@@ -1152,8 +1162,47 @@ public class MarketAppServiceImpl implements MarketAppService {
      */
     private void validatePositive(Long value, String message) {
         if (value == null || value.longValue() <= 0L) {
-            throw new IllegalArgumentException(message);
+            throwParamInvalid(message);
         }
+    }
+
+    /**
+     * 校验可选正整数。
+     *
+     * @param value 值
+     * @param message 错误消息
+     */
+    private void validateOptionalPositive(Long value, String message) {
+        if (value != null && value.longValue() <= 0L) {
+            throwParamInvalid(message);
+        }
+    }
+
+    /**
+     * 抛出参数错误。
+     *
+     * @param message 错误消息
+     */
+    private void throwParamInvalid(String message) {
+        throw new BizException(ErrorCode.PARAM_INVALID, message);
+    }
+
+    /**
+     * 抛出资源不存在错误。
+     *
+     * @param message 错误消息
+     */
+    private void throwNotFound(String message) {
+        throw new BizException(ErrorCode.NOT_FOUND, message);
+    }
+
+    /**
+     * 抛出业务冲突错误。
+     *
+     * @param message 错误消息
+     */
+    private void throwConflict(String message) {
+        throw new BizException(ErrorCode.CONFLICT, message);
     }
 
     /**

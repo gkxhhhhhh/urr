@@ -11,13 +11,14 @@ import com.urr.commons.api.ResponseData;
 import lombok.RequiredArgsConstructor;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import javax.validation.Valid;
+import javax.validation.constraints.Positive;
 
 /**
  * 市场一期 Controller。
@@ -128,7 +129,8 @@ public class MarketController {
      * @return 成交结果
      */
     @PostMapping("/sell-orders/{orderId}/buy")
-    public ResponseData buySellOrder(@PathVariable("orderId") Long orderId, @RequestBody @Valid MarketTradeRequest request) {
+    public ResponseData buySellOrder(@PathVariable("orderId") @Positive(message = "orderId必须大于0") Long orderId,
+                                     @RequestBody @Valid MarketTradeRequest request) {
         Long accountId = AuthRequired.requireAccountId();
         return ResponseData.success(
                 marketAppService.buySellOrder(
@@ -169,7 +171,8 @@ public class MarketController {
      * @return 成交结果
      */
     @PostMapping("/buy-orders/{orderId}/sell")
-    public ResponseData sellToBuyOrder(@PathVariable("orderId") Long orderId, @RequestBody @Valid MarketTradeRequest request) {
+    public ResponseData sellToBuyOrder(@PathVariable("orderId") @Positive(message = "orderId必须大于0") Long orderId,
+                                       @RequestBody @Valid MarketTradeRequest request) {
         Long accountId = AuthRequired.requireAccountId();
         return ResponseData.success(
                 marketAppService.sellToBuyOrder(
@@ -189,7 +192,8 @@ public class MarketController {
      * @return 取消结果
      */
     @PostMapping("/orders/{orderId}/cancel")
-    public ResponseData cancelOrder(@PathVariable("orderId") Long orderId, @RequestBody @Valid CancelMarketOrderRequest request) {
+    public ResponseData cancelOrder(@PathVariable("orderId") @Positive(message = "orderId必须大于0") Long orderId,
+                                    @RequestBody @Valid CancelMarketOrderRequest request) {
         Long accountId = AuthRequired.requireAccountId();
         return ResponseData.success(
                 marketAppService.cancelOrder(

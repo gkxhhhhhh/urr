@@ -3,6 +3,7 @@ package com.urr.api.game.dto;
 import lombok.Data;
 
 import javax.validation.constraints.NotNull;
+import javax.validation.constraints.Positive;
 
 /**
  * 取消市场订单请求。
@@ -14,5 +15,6 @@ public class CancelMarketOrderRequest {
      * 玩家ID。
      */
     @NotNull(message = "playerId不能为空")
+    @Positive(message = "playerId必须大于0")
     private Long playerId;
 }
