@@ -1113,6 +1113,51 @@ CREATE TABLE `t_urr_player_action_queue` (
   COLLATE = utf8mb4_general_ci
   COMMENT = '玩家动作队列'
   ROW_FORMAT = Dynamic;
+
+
+
+-- ---------------------------------------------------------
+-- 模块1：市场入口链路修复
+-- 目标：
+-- 1. fresh DB 导入后动作树可返回市场入口
+-- 2. 首页左侧菜单拿到 behavior.code = MARKET
+-- 3. MARKET 工作区可直接命中 MarketWorkspacePanel
+-- 注意：
+-- 1. TRADE 作为行为域编码保留
+-- 2. MARKET 作为首页唯一工作区入口编码
+-- 3. 必须补一个子 action，否则 behavior 会被标记为 unlocked=false
+-- ---------------------------------------------------------
+
+-- 1) 新增行为域：交易
+INSERT INTO `t_urr_behavior_group_def`
+(`id`, `group_code`, `group_name`, `status`, `params_json`, `version`, `remarks`, `create_user`, `create_time`, `update_user`, `update_time`, `delete_flag`)
+VALUES
+    (4, 'TRADE', '交易', 1, NULL, 0, '市场模块所属行为域', '-1', '2026-03-14 15:00:00', '-1', '2026-03-14 15:00:00', 0);
+
+-- 2) 新增行为：市场
+-- 说明：
+-- 1. group_code 仍然挂在 TRADE 下
+-- 2. behavior_code 使用 MARKET，供前端左侧菜单与首页工作区统一命中
+INSERT INTO `t_urr_behavior_def`
+(`id`, `group_code`, `behavior_code`, `behavior_name`, `status`, `settle_granularity_sec`, `allow_parallel`, `params_json`, `version`, `remarks`, `create_user`, `create_time`, `update_user`, `update_time`, `delete_flag`)
+VALUES
+    (4, 'TRADE', 'MARKET', '市场', 1, 1, 0, NULL, 0, '首页市场入口行为', '-1', '2026-03-14 15:00:10', '-1', '2026-03-14 15:00:10', 0);
+
+-- 3) 新增市场入口动作
+-- 说明：
+-- 1. 该动作的主要作用是让 MARKET behavior 在动作树中成为可解锁节点
+-- 2. 首页实际展示 MarketWorkspacePanel，不走 HomeActionStagePanel
+INSERT INTO `t_urr_action_def`
+(`id`, `behavior_id`, `category_id`, `sub_category_id`, `action_code`, `action_name`, `status`, `action_kind`, `base_duration_ms`, `base_energy_cost`, `min_player_level`, `min_skill_level`, `unlock_condition_json`, `duration_scale_rule`, `reward_scale_rule`, `params_json`, `version`, `remarks`, `create_user`, `create_time`, `update_user`, `update_time`, `delete_flag`)
+VALUES
+    (13, 4, 0, 0, 'MARKET_HOME', '市场', 1, 'MODULE', 0, 0, 1, 0, NULL, NULL, NULL,
+     '{"module":"market","entry":"workspace","note":"首页市场面板入口"}',
+     0, '市场首页入口动作', '-1', '2026-03-14 15:00:20', '-1', '2026-03-14 15:00:20', 0);
+
+-- 4) 调整自增游标，避免后续插入撞号
+ALTER TABLE `t_urr_behavior_group_def` AUTO_INCREMENT = 5;
+ALTER TABLE `t_urr_behavior_def` AUTO_INCREMENT = 5;
+ALTER TABLE `t_urr_action_def` AUTO_INCREMENT = 14;
 -- ----------------------------
 -- Records of t_urr_wallet_flow
 -- ----------------------------
