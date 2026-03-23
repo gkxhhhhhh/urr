@@ -4,7 +4,10 @@ import com.urr.app.market.result.MarketCancelOrderResult;
 import com.urr.app.market.result.MarketCreateOrderResult;
 import com.urr.app.market.result.MarketInventoryResult;
 import com.urr.app.market.result.MarketItemCatalogResult;
+import com.urr.app.market.result.MarketItemDetailResult;
+import com.urr.app.market.result.MarketMyOverviewResult;
 import com.urr.app.market.result.MarketOrderPageResult;
+import com.urr.app.market.result.MarketOverviewResult;
 import com.urr.app.market.result.MarketTradePageResult;
 import com.urr.app.market.result.MarketTradeResult;
 
@@ -32,11 +35,40 @@ public interface MarketAppService {
     MarketItemCatalogResult queryTradableItems(Long accountId, Long playerId);
 
     /**
+     * 查询市场首页总览。
+     *
+     * @param accountId 账号ID
+     * @param playerId 玩家ID
+     * @return 首页总览
+     */
+    MarketOverviewResult queryOverview(Long accountId, Long playerId);
+
+    /**
+     * 查询单商品详情。
+     *
+     * @param accountId 账号ID
+     * @param playerId 玩家ID
+     * @param itemId 物品ID
+     * @return 商品详情
+     */
+    MarketItemDetailResult queryItemDetail(Long accountId, Long playerId, Long itemId);
+
+    /**
+     * 查询我的市场总览。
+     *
+     * @param accountId 账号ID
+     * @param playerId 玩家ID
+     * @return 我的市场总览
+     */
+    MarketMyOverviewResult queryMyOverview(Long accountId, Long playerId);
+
+    /**
      * 查询市场列表。
      *
      * @param accountId 账号ID
      * @param playerId 玩家ID
      * @param orderTypeCode 订单类型
+     * @param itemId 物品ID
      * @param pageNo 页码
      * @param pageSize 页大小
      * @return 分页结果

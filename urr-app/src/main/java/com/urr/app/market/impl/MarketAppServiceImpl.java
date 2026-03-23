@@ -6,14 +6,18 @@ import com.urr.app.market.MarketAppService;
 import com.urr.app.market.result.MarketCancelOrderResult;
 import com.urr.app.market.result.MarketCreateOrderResult;
 import com.urr.app.market.result.MarketInventoryItemView;
+import com.urr.app.market.result.MarketCatalogItemSummaryView;
 import com.urr.app.market.result.MarketInventoryResult;
+import com.urr.app.market.result.MarketItemCatalogResult;
+import com.urr.app.market.result.MarketItemCatalogView;
+import com.urr.app.market.result.MarketItemDetailResult;
+import com.urr.app.market.result.MarketMyOverviewResult;
 import com.urr.app.market.result.MarketOrderPageResult;
 import com.urr.app.market.result.MarketOrderView;
+import com.urr.app.market.result.MarketOverviewResult;
 import com.urr.app.market.result.MarketTradePageResult;
 import com.urr.app.market.result.MarketTradeResult;
 import com.urr.app.market.result.MarketTradeView;
-import com.urr.app.market.result.MarketItemCatalogResult;
-import com.urr.app.market.result.MarketItemCatalogView;
 import com.urr.domain.item.ItemDefEntity;
 import com.urr.domain.item.PlayerItemStackEntity;
 import com.urr.domain.market.MarketOrderEntity;
@@ -117,73 +121,79 @@ public class MarketAppServiceImpl implements MarketAppService {
     @Override
     public MarketInventoryResult queryTradableInventory(Long accountId, Long playerId) {
         PlayerEntity player = loadPlayer(accountId, playerId);
-
-        LambdaQueryWrapper<PlayerItemStackEntity> stackQuery = new LambdaQueryWrapper<>();
-        stackQuery.eq(PlayerItemStackEntity::getPlayerId, player.getId());
-        stackQuery.eq(PlayerItemStackEntity::getServerId, player.getServerId());
-        stackQuery.eq(PlayerItemStackEntity::getLocation, BAG_LOCATION);
-        stackQuery.gt(PlayerItemStackEntity::getQty, 0L);
-        List<PlayerItemStackEntity> stacks = playerItemStackMapper.selectList(stackQuery);
-        if (stacks == null || stacks.isEmpty()) {
-            return new MarketInventoryResult();
-        }
-
-        Map<Long, ItemDefEntity> itemMap = loadItemMap(extractItemIdsFromStacks(stacks));
-
-        List<MarketInventoryItemView> resultList = new ArrayList<>();
-        for (int i = 0; i < stacks.size(); i++) {
-            PlayerItemStackEntity stack = stacks.get(i);
-            ItemDefEntity itemDef = itemMap.get(stack.getItemId());
-            if (!canTradeInMarket(itemDef)) {
-                continue;
-            }
-
-            MarketInventoryItemView view = new MarketInventoryItemView();
-            view.setItemId(stack.getItemId());
-            view.setItemName(itemDef.getNameZh());
-            view.setBagQty(stack.getQty());
-            resultList.add(view);
-        }
-
-        MarketInventoryResult result = new MarketInventoryResult();
-        result.setCount(resultList.size());
-        result.setList(resultList);
-        return result;
+        return doQueryTradableInventory(player);
     }
 
-
+    /**
+     * 查询可交易商品目录。
+     *
+     * @param accountId 账号ID
+     * @param playerId 玩家ID
+     * @return 商品目录
+     */
     @Override
     public MarketItemCatalogResult queryTradableItems(Long accountId, Long playerId) {
         PlayerEntity player = loadPlayer(accountId, playerId);
+        return doQueryTradableItems(player);
+    }
 
-        LambdaQueryWrapper<ItemDefEntity> query = new LambdaQueryWrapper<>();
-        query.eq(ItemDefEntity::getTradeable, 1);
-        query.eq(ItemDefEntity::getStackable, 1);
-        query.and(wrapper -> wrapper.isNull(ItemDefEntity::getBindType).or().eq(ItemDefEntity::getBindType, 0));
-        query.orderByAsc(ItemDefEntity::getItemType)
-                .orderByAsc(ItemDefEntity::getId);
+    /**
+     * 查询市场首页总览。
+     *
+     * @param accountId 账号ID
+     * @param playerId 玩家ID
+     * @return 总览结果
+     */
+    @Override
+    public MarketOverviewResult queryOverview(Long accountId, Long playerId) {
+        PlayerEntity player = loadPlayer(accountId, playerId);
 
-        List<ItemDefEntity> items = itemDefMapper.selectList(query);
-        List<MarketItemCatalogView> resultList = new ArrayList<>();
-        for (int i = 0; i < items.size(); i++) {
-            ItemDefEntity item = items.get(i);
-            if (!canTradeInMarket(item)) {
-                continue;
-            }
+        MarketItemCatalogResult catalog = doQueryTradableItems(player);
+        MarketInventoryResult inventory = doQueryTradableInventory(player);
 
-            MarketItemCatalogView view = new MarketItemCatalogView();
-            view.setItemId(item.getId());
-            view.setItemCode(item.getItemCode());
-            view.setItemName(item.getNameZh());
-            view.setItemType(item.getItemType());
-            view.setRarity(item.getRarity());
-            view.setMetaJson(item.getMetaJson());
-            resultList.add(view);
-        }
+        MarketOverviewResult result = new MarketOverviewResult();
+        result.setCatalog(catalog);
+        result.setInventory(inventory);
+        result.setSummaryList(buildCatalogSummaryList(player, catalog));
+        return result;
+    }
 
-        MarketItemCatalogResult result = new MarketItemCatalogResult();
-        result.setCount((long) resultList.size());
-        result.setList(resultList);
+    /**
+     * 查询单商品详情。
+     *
+     * @param accountId 账号ID
+     * @param playerId 玩家ID
+     * @param itemId 物品ID
+     * @return 详情结果
+     */
+    @Override
+    public MarketItemDetailResult queryItemDetail(Long accountId, Long playerId, Long itemId) {
+        PlayerEntity player = loadPlayer(accountId, playerId);
+        ItemDefEntity itemDef = loadTradableItem(itemId);
+
+        MarketItemDetailResult result = new MarketItemDetailResult();
+        result.setItem(buildItemCatalogView(itemDef));
+        result.setBagQty(getBagQty(player, itemId));
+        result.setSummary(buildItemSummary(player, itemId));
+        result.setSellOrders(doQueryMarketOrders(player, MarketOrderTypeEnum.SELL.getCode(), itemId, 1, 100));
+        result.setBuyOrders(doQueryMarketOrders(player, MarketOrderTypeEnum.BUY.getCode(), itemId, 1, 100));
+        return result;
+    }
+
+    /**
+     * 查询我的市场总览。
+     *
+     * @param accountId 账号ID
+     * @param playerId 玩家ID
+     * @return 我的市场总览
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public MarketMyOverviewResult queryMyOverview(Long accountId, Long playerId) {
+        MarketMyOverviewResult result = new MarketMyOverviewResult();
+        result.setMySellOrders(queryMyOrders(accountId, playerId, MarketOrderTypeEnum.SELL.getCode(), 1, 50));
+        result.setMyBuyOrders(queryMyOrders(accountId, playerId, MarketOrderTypeEnum.BUY.getCode(), 1, 50));
+        result.setMyTrades(queryMyTrades(accountId, playerId, 1, 50));
         return result;
     }
 
@@ -200,34 +210,7 @@ public class MarketAppServiceImpl implements MarketAppService {
     @Override
     public MarketOrderPageResult queryMarketOrders(Long accountId, Long playerId, String orderTypeCode, Long itemId, Integer pageNo, Integer pageSize) {
         PlayerEntity player = loadPlayer(accountId, playerId);
-        MarketOrderTypeEnum orderType = requireOrderType(orderTypeCode);
-
-        Page<MarketOrderEntity> page = new Page<>(normalizePageNo(pageNo), normalizePageSize(pageSize));
-
-        LambdaQueryWrapper<MarketOrderEntity> query = new LambdaQueryWrapper<>();
-        query.eq(MarketOrderEntity::getServerId, player.getServerId());
-        query.eq(MarketOrderEntity::getOrderType, orderType.getDbValue());
-        query.in(MarketOrderEntity::getStatus,
-                MarketOrderStatusEnum.LISTED.getDbValue(),
-                MarketOrderStatusEnum.PARTIAL.getDbValue());
-        query.gt(MarketOrderEntity::getQtyRemain, 0L);
-        query.and(wrapper -> wrapper.isNull(MarketOrderEntity::getExpireTime)
-                .or()
-                .gt(MarketOrderEntity::getExpireTime, LocalDateTime.now()));
-        if (itemId != null) {
-            validatePositive(itemId, "itemId必须大于0");
-            query.eq(MarketOrderEntity::getItemId, itemId);
-        }
-        if (MarketOrderTypeEnum.SELL.equals(orderType)) {
-            query.orderByAsc(MarketOrderEntity::getPriceEach)
-                    .orderByAsc(MarketOrderEntity::getCreateTime);
-        } else {
-            query.orderByDesc(MarketOrderEntity::getPriceEach)
-                    .orderByAsc(MarketOrderEntity::getCreateTime);
-        }
-
-        Page<MarketOrderEntity> orderPage = marketOrderMapper.selectPage(page, query);
-        return buildOrderPageResult(orderPage.getTotal(), orderPage.getRecords());
+        return doQueryMarketOrders(player, orderTypeCode, itemId, pageNo, pageSize);
     }
 
     /**
@@ -579,6 +562,260 @@ public class MarketAppServiceImpl implements MarketAppService {
         return order;
     }
 
+
+    /**
+     * 查询可挂牌库存。
+     *
+     * @param player 玩家
+     * @return 可挂牌库存
+     */
+    private MarketInventoryResult doQueryTradableInventory(PlayerEntity player) {
+        LambdaQueryWrapper<PlayerItemStackEntity> stackQuery = new LambdaQueryWrapper<>();
+        stackQuery.eq(PlayerItemStackEntity::getPlayerId, player.getId());
+        stackQuery.eq(PlayerItemStackEntity::getServerId, player.getServerId());
+        stackQuery.eq(PlayerItemStackEntity::getLocation, BAG_LOCATION);
+        stackQuery.gt(PlayerItemStackEntity::getQty, 0L);
+        List<PlayerItemStackEntity> stacks = playerItemStackMapper.selectList(stackQuery);
+        if (stacks == null || stacks.isEmpty()) {
+            return new MarketInventoryResult();
+        }
+
+        Map<Long, ItemDefEntity> itemMap = loadItemMap(extractItemIdsFromStacks(stacks));
+
+        List<MarketInventoryItemView> resultList = new ArrayList<>();
+        for (int i = 0; i < stacks.size(); i++) {
+            PlayerItemStackEntity stack = stacks.get(i);
+            ItemDefEntity itemDef = itemMap.get(stack.getItemId());
+            if (!canTradeInMarket(itemDef)) {
+                continue;
+            }
+
+            MarketInventoryItemView view = new MarketInventoryItemView();
+            view.setItemId(stack.getItemId());
+            view.setItemName(itemDef.getNameZh());
+            view.setBagQty(stack.getQty());
+            resultList.add(view);
+        }
+
+        MarketInventoryResult result = new MarketInventoryResult();
+        result.setCount(resultList.size());
+        result.setList(resultList);
+        return result;
+    }
+
+    /**
+     * 查询可交易商品目录。
+     *
+     * @param player 玩家
+     * @return 商品目录
+     */
+    private MarketItemCatalogResult doQueryTradableItems(PlayerEntity player) {
+        LambdaQueryWrapper<ItemDefEntity> query = new LambdaQueryWrapper<>();
+        query.eq(ItemDefEntity::getTradeable, 1);
+        query.eq(ItemDefEntity::getStackable, 1);
+        query.and(wrapper -> wrapper.isNull(ItemDefEntity::getBindType).or().eq(ItemDefEntity::getBindType, 0));
+        query.orderByAsc(ItemDefEntity::getItemType)
+                .orderByAsc(ItemDefEntity::getId);
+
+        List<ItemDefEntity> items = itemDefMapper.selectList(query);
+        List<MarketItemCatalogView> resultList = new ArrayList<>();
+        for (int i = 0; i < items.size(); i++) {
+            ItemDefEntity item = items.get(i);
+            if (!canTradeInMarket(item)) {
+                continue;
+            }
+
+            resultList.add(buildItemCatalogView(item));
+        }
+
+        MarketItemCatalogResult result = new MarketItemCatalogResult();
+        result.setCount((long) resultList.size());
+        result.setList(resultList);
+        return result;
+    }
+
+    /**
+     * 查询市场列表。
+     *
+     * @param player 玩家
+     * @param orderTypeCode 订单类型
+     * @param itemId 物品ID
+     * @param pageNo 页码
+     * @param pageSize 页大小
+     * @return 市场分页结果
+     */
+    private MarketOrderPageResult doQueryMarketOrders(PlayerEntity player, String orderTypeCode, Long itemId, Integer pageNo, Integer pageSize) {
+        MarketOrderTypeEnum orderType = requireOrderType(orderTypeCode);
+
+        Page<MarketOrderEntity> page = new Page<>(normalizePageNo(pageNo), normalizePageSize(pageSize));
+
+        LambdaQueryWrapper<MarketOrderEntity> query = new LambdaQueryWrapper<>();
+        query.eq(MarketOrderEntity::getServerId, player.getServerId());
+        query.eq(MarketOrderEntity::getOrderType, orderType.getDbValue());
+        query.in(MarketOrderEntity::getStatus,
+                MarketOrderStatusEnum.LISTED.getDbValue(),
+                MarketOrderStatusEnum.PARTIAL.getDbValue());
+        query.gt(MarketOrderEntity::getQtyRemain, 0L);
+        query.and(wrapper -> wrapper.isNull(MarketOrderEntity::getExpireTime)
+                .or()
+                .gt(MarketOrderEntity::getExpireTime, LocalDateTime.now()));
+        if (itemId != null) {
+            validatePositive(itemId, "itemId必须大于0");
+            query.eq(MarketOrderEntity::getItemId, itemId);
+        }
+        if (MarketOrderTypeEnum.SELL.equals(orderType)) {
+            query.orderByAsc(MarketOrderEntity::getPriceEach)
+                    .orderByAsc(MarketOrderEntity::getCreateTime);
+        } else {
+            query.orderByDesc(MarketOrderEntity::getPriceEach)
+                    .orderByAsc(MarketOrderEntity::getCreateTime);
+        }
+
+        Page<MarketOrderEntity> orderPage = marketOrderMapper.selectPage(page, query);
+        return buildOrderPageResult(orderPage.getTotal(), orderPage.getRecords());
+    }
+
+    /**
+     * 查询当前区服全部未结束订单。
+     *
+     * @param serverId 区服ID
+     * @param itemId 物品ID
+     * @return 未结束订单
+     */
+    private List<MarketOrderEntity> listOpenOrders(Integer serverId, Long itemId) {
+        LambdaQueryWrapper<MarketOrderEntity> query = new LambdaQueryWrapper<>();
+        query.eq(MarketOrderEntity::getServerId, serverId);
+        query.in(MarketOrderEntity::getStatus,
+                MarketOrderStatusEnum.LISTED.getDbValue(),
+                MarketOrderStatusEnum.PARTIAL.getDbValue());
+        query.gt(MarketOrderEntity::getQtyRemain, 0L);
+        query.and(wrapper -> wrapper.isNull(MarketOrderEntity::getExpireTime)
+                .or()
+                .gt(MarketOrderEntity::getExpireTime, LocalDateTime.now()));
+        if (itemId != null) {
+            validatePositive(itemId, "itemId必须大于0");
+            query.eq(MarketOrderEntity::getItemId, itemId);
+        }
+        query.orderByAsc(MarketOrderEntity::getItemId)
+                .orderByAsc(MarketOrderEntity::getOrderType)
+                .orderByAsc(MarketOrderEntity::getCreateTime);
+
+        return marketOrderMapper.selectList(query);
+    }
+
+    /**
+     * 构造目录概要列表。
+     *
+     * @param player 玩家
+     * @param catalog 商品目录
+     * @return 概要列表
+     */
+    private List<MarketCatalogItemSummaryView> buildCatalogSummaryList(PlayerEntity player, MarketItemCatalogResult catalog) {
+        Map<Long, MarketCatalogItemSummaryView> summaryMap = new LinkedHashMap<>();
+        List<MarketItemCatalogView> catalogList = catalog == null ? Collections.emptyList() : catalog.getList();
+        for (int i = 0; i < catalogList.size(); i++) {
+            MarketItemCatalogView item = catalogList.get(i);
+            summaryMap.put(item.getItemId(), createEmptyCatalogSummary(item.getItemId()));
+        }
+
+        aggregateCatalogSummary(summaryMap, listOpenOrders(player.getServerId(), null));
+        return new ArrayList<>(summaryMap.values());
+    }
+
+    /**
+     * 构造单商品概要。
+     *
+     * @param player 玩家
+     * @param itemId 物品ID
+     * @return 商品概要
+     */
+    private MarketCatalogItemSummaryView buildItemSummary(PlayerEntity player, Long itemId) {
+        Map<Long, MarketCatalogItemSummaryView> summaryMap = new LinkedHashMap<>();
+        summaryMap.put(itemId, createEmptyCatalogSummary(itemId));
+        aggregateCatalogSummary(summaryMap, listOpenOrders(player.getServerId(), itemId));
+        return summaryMap.get(itemId);
+    }
+
+    /**
+     * 聚合目录概要。
+     *
+     * @param summaryMap 概要映射
+     * @param orders 订单列表
+     */
+    private void aggregateCatalogSummary(Map<Long, MarketCatalogItemSummaryView> summaryMap, List<MarketOrderEntity> orders) {
+        if (orders == null || orders.isEmpty()) {
+            return;
+        }
+
+        for (int i = 0; i < orders.size(); i++) {
+            MarketOrderEntity order = orders.get(i);
+            MarketCatalogItemSummaryView summary = summaryMap.get(order.getItemId());
+            if (summary == null) {
+                summary = createEmptyCatalogSummary(order.getItemId());
+                summaryMap.put(order.getItemId(), summary);
+            }
+
+            long remainQty = safeLong(order.getQtyRemain());
+            MarketOrderTypeEnum orderType = MarketOrderTypeEnum.fromDbValue(order.getOrderType());
+            if (MarketOrderTypeEnum.SELL.equals(orderType)) {
+                summary.setSellOrderCount(summary.getSellOrderCount() + 1L);
+                summary.setSellQty(summary.getSellQty() + remainQty);
+                if (summary.getLowestSellPrice() == null || safeLong(order.getPriceEach()) < safeLong(summary.getLowestSellPrice())) {
+                    summary.setLowestSellPrice(order.getPriceEach());
+                }
+            } else if (MarketOrderTypeEnum.BUY.equals(orderType)) {
+                summary.setBuyOrderCount(summary.getBuyOrderCount() + 1L);
+                summary.setBuyQty(summary.getBuyQty() + remainQty);
+                if (summary.getHighestBuyPrice() == null || safeLong(order.getPriceEach()) > safeLong(summary.getHighestBuyPrice())) {
+                    summary.setHighestBuyPrice(order.getPriceEach());
+                }
+            }
+        }
+    }
+
+    /**
+     * 创建空商品概要。
+     *
+     * @param itemId 物品ID
+     * @return 空概要
+     */
+    private MarketCatalogItemSummaryView createEmptyCatalogSummary(Long itemId) {
+        MarketCatalogItemSummaryView view = new MarketCatalogItemSummaryView();
+        view.setItemId(itemId);
+        return view;
+    }
+
+    /**
+     * 构造商品目录视图。
+     *
+     * @param itemDef 物品定义
+     * @return 目录视图
+     */
+    private MarketItemCatalogView buildItemCatalogView(ItemDefEntity itemDef) {
+        MarketItemCatalogView view = new MarketItemCatalogView();
+        view.setItemId(itemDef.getId());
+        view.setItemCode(itemDef.getItemCode());
+        view.setItemName(itemDef.getNameZh());
+        view.setItemType(itemDef.getItemType());
+        view.setRarity(itemDef.getRarity());
+        view.setMetaJson(itemDef.getMetaJson());
+        return view;
+    }
+
+    /**
+     * 读取玩家背包中的物品数量。
+     *
+     * @param player 玩家
+     * @param itemId 物品ID
+     * @return 背包数量
+     */
+    private Long getBagQty(PlayerEntity player, Long itemId) {
+        PlayerItemStackEntity bagStack = findStack(player.getId(), player.getServerId(), itemId, BAG_LOCATION);
+        if (bagStack == null || bagStack.getQty() == null) {
+            return 0L;
+        }
+        return bagStack.getQty();
+    }
     /**
      * 校验订单仍可操作。
      *
@@ -1244,6 +1481,19 @@ public class MarketAppServiceImpl implements MarketAppService {
      */
     private void throwConflict(String message) {
         throw new BizException(ErrorCode.CONFLICT, message);
+    }
+
+    /**
+     * 读取 Long 安全值。
+     *
+     * @param value Long值
+     * @return 数值
+     */
+    private long safeLong(Long value) {
+        if (value == null) {
+            return 0L;
+        }
+        return value.longValue();
     }
 
     /**
