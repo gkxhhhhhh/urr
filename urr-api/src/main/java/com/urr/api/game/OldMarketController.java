@@ -25,10 +25,10 @@ import javax.validation.constraints.Positive;
  * 市场一期 Controller。
  */
 @RestController
-@RequestMapping("/api/game/market")
+@RequestMapping("/api/old/game/market")
 @RequiredArgsConstructor
 @Validated
-public class MarketController {
+public class OldMarketController {
 
     /**
      * 市场应用服务。

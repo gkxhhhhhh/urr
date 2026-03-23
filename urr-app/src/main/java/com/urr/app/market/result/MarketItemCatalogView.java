@@ -34,6 +34,16 @@ public class MarketItemCatalogView {
     private Integer rarity;
 
     /**
+     * 商店售卖价格。
+     */
+    private Long sellPrice;
+
+    /**
+     * 物品备注描述。
+     */
+    private String remarks;
+
+    /**
      * 扩展元数据。
      */
     private String metaJson;

@@ -798,6 +798,8 @@ public class MarketAppServiceImpl implements MarketAppService {
         view.setItemName(itemDef.getNameZh());
         view.setItemType(itemDef.getItemType());
         view.setRarity(itemDef.getRarity());
+        view.setSellPrice(itemDef.getSellPrice());
+        view.setRemarks(itemDef.getRemarks());
         view.setMetaJson(itemDef.getMetaJson());
         return view;
     }
