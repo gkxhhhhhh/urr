@@ -6,15 +6,10 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 战斗启动结果。
+ * 最近一次战斗结果。
  */
 @Data
-public class BattleStartResultDTO {
-
-    /**
-     * 战斗运行记录ID。
-     */
-    private Long runId;
+public class LastBattleResultDTO {
 
     /**
      * 玩家ID。
@@ -22,9 +17,9 @@ public class BattleStartResultDTO {
     private Long playerId;
 
     /**
-     * 动作编码。
+     * 战斗运行记录ID。
      */
-    private String actionCode;
+    private Long runId;
 
     /**
      * 副本编码。
@@ -32,37 +27,22 @@ public class BattleStartResultDTO {
     private String dungeonCode;
 
     /**
-     * 遭遇编码。
-     */
-    private String encounterCode;
-
-    /**
      * 战斗结果。
      */
     private String result;
 
     /**
-     * 本次消耗体力。
+     * 体力消耗。
      */
     private Integer energyCost;
 
     /**
-     * 本次战斗耗时（毫秒）。
+     * 战斗耗时（毫秒）。
      */
     private Integer battleTimeMs;
 
     /**
-     * 战斗前体力。
-     */
-    private Integer beforeEnergy;
-
-    /**
-     * 战斗后体力。
-     */
-    private Integer afterEnergy;
-
-    /**
-     * 各波次结果。
+     * 波次结果。
      */
     private List<BattleWaveResultDTO> waves = new ArrayList<>();
 
