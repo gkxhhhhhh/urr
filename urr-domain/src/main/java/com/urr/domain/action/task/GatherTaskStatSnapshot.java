@@ -12,6 +12,7 @@ import java.math.BigDecimal;
  * 2. 当前装备影响先用 json 字符串承载，避免这轮过度设计。
  * 3. rewardSeed 同时保留在快照和任务根上，便于快照自解释，也便于任务快速读取。
  * 4. 本次把产物、经验、爆率、暴击率一起锁进快照，避免任务运行中被后续配置变更影响。
+ * 5. 为兼容混采，新增 rewardListJson；单采继续兼容 itemCode。
  */
 @Data
 public class GatherTaskStatSnapshot {
@@ -50,8 +51,15 @@ public class GatherTaskStatSnapshot {
 
     /**
      * 本任务锁定的产出物编码。
+     * 单采沿用该字段；混采时允许为空。
      */
     private String itemCode;
+
+    /**
+     * 本任务锁定的奖励列表 JSON。
+     * 混采使用该字段；单采也可同步写入，便于统一处理。
+     */
+    private String rewardListJson;
 
     /**
      * 本任务锁定的技能编码。
@@ -102,6 +110,8 @@ public class GatherTaskStatSnapshot {
      * @return true-已锁定，false-未锁定
      */
     public boolean hasLockedRewardConfig() {
-        return itemCode != null && !itemCode.trim().isEmpty();
+        boolean hasSingleItem = itemCode != null && !itemCode.trim().isEmpty();
+        boolean hasRewardList = rewardListJson != null && !rewardListJson.trim().isEmpty();
+        return hasSingleItem || hasRewardList;
     }
 }

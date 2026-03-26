@@ -185,6 +185,7 @@ public class ActionTreeAppServiceImpl implements ActionTreeAppService {
                         .orderByAsc(ActionDefEntity::getBehaviorId)
                         .orderByAsc(ActionDefEntity::getCategoryId)
                         .orderByAsc(ActionDefEntity::getSubCategoryId)
+                        .orderByAsc(ActionDefEntity::getSort)
                         .orderByAsc(ActionDefEntity::getId)
         );
 
@@ -544,7 +545,7 @@ public class ActionTreeAppServiceImpl implements ActionTreeAppService {
                 NODE_ACTION,
                 entity.getActionCode(),
                 entity.getActionName(),
-                defaultLong(entity.getId(), 0L).intValue(),
+                defaultInt(entity.getSort(), 0),
                 entity.getStatus()
         );
 

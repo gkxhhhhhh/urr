@@ -25,9 +25,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * 采集任务奖励生成器。
  *
  * 说明：
- * 1. 本次不再硬编码动作到物品的映射。
+ * 1. 不再硬编码动作到物品的映射。
  * 2. 所有采集奖励配置都在项目启动时从 t_urr_action_def.params_json 读取并缓存。
  * 3. 任务启动时会把关键奖励字段锁进快照；结算时优先用快照，兼容旧任务时再回退缓存。
+ * 4. 本次新增 rewardList 支持：允许一个动作对应多个候选物品，每轮按 chance 选 1 个。
  */
 @Component
 @RequiredArgsConstructor
@@ -83,7 +84,8 @@ public class GatherTaskRewardGenerator {
         );
 
         Map<String, ActionRewardConfig> latestMap = new ConcurrentHashMap<String, ActionRewardConfig>();
-        for (ActionDefEntity action : actionList) {
+        for (int i = 0; i < actionList.size(); i += 1) {
+            ActionDefEntity action = actionList.get(i);
             ActionRewardConfig config = tryBuildRewardConfig(action);
             if (config == null) {
                 continue;
@@ -106,15 +108,17 @@ public class GatherTaskRewardGenerator {
         validateTask(task);
 
         ActionRewardConfig config = requireRewardConfig(task);
+        ActionRewardItemConfig rewardItem = rollRewardItem(task, roundIndex, config);
         long quantity = calculateItemQuantity(task, roundIndex, config);
+
         List<GatherTaskRewardEntry> rewardList = new ArrayList<GatherTaskRewardEntry>();
-        if (quantity <= 0L) {
+        if (rewardItem == null || quantity <= 0L) {
             return rewardList;
         }
 
         GatherTaskRewardEntry rewardEntry = new GatherTaskRewardEntry();
         rewardEntry.setRewardType(REWARD_TYPE_ITEM);
-        rewardEntry.setRewardCode(config.getItemCode());
+        rewardEntry.setRewardCode(rewardItem.getItemCode());
         rewardEntry.setQuantity(quantity);
         rewardList.add(rewardEntry);
         return rewardList;
@@ -161,10 +165,40 @@ public class GatherTaskRewardGenerator {
     }
 
     /**
+     * 构建快照用的 rewardListJson。
+     *
+     * @param config 奖励配置
+     * @return rewardListJson
+     */
+    public String buildSnapshotRewardListJson(ActionRewardConfig config) {
+        if (config == null) {
+            return null;
+        }
+
+        try {
+            List<ActionRewardItemConfig> rewardItems = copyRewardItemList(config.getRewardItems());
+            if (rewardItems.isEmpty() && StringUtils.hasText(config.getItemCode())) {
+                ActionRewardItemConfig itemConfig = new ActionRewardItemConfig();
+                itemConfig.setItemCode(config.getItemCode());
+                itemConfig.setChance(FULL_PERCENT);
+                rewardItems.add(itemConfig);
+            }
+
+            if (rewardItems.isEmpty()) {
+                return null;
+            }
+
+            return objectMapper.writeValueAsString(rewardItems);
+        } catch (IOException e) {
+            throw new IllegalStateException("构建 rewardListJson 失败", e);
+        }
+    }
+
+    /**
      * 尝试从动作定义构建奖励配置。
      *
      * @param action 动作定义
-     * @return 奖励配置；未配置 itemCode 时返回 null
+     * @return 奖励配置；未配置奖励时返回 null
      */
     private ActionRewardConfig tryBuildRewardConfig(ActionDefEntity action) {
         if (action == null || !StringUtils.hasText(action.getActionCode())) {
@@ -176,14 +210,14 @@ public class GatherTaskRewardGenerator {
             return null;
         }
 
-        String itemCode = readText(root, "itemCode");
-        if (!StringUtils.hasText(itemCode)) {
+        List<ActionRewardItemConfig> rewardItems = readRewardItemConfigsFromRoot(root);
+        if (rewardItems.isEmpty()) {
             return null;
         }
 
         ActionRewardConfig config = new ActionRewardConfig();
         config.setActionCode(action.getActionCode().trim());
-        config.setItemCode(itemCode);
+        config.setRewardItems(rewardItems);
         config.setSkillCode(readText(root, "skillCode"));
         config.setExpGain(readInteger(root, "expGain"));
         config.setCriticalRate(readDecimal(root, "criticalRate"));
@@ -204,6 +238,7 @@ public class GatherTaskRewardGenerator {
         if (action == null || !StringUtils.hasText(action.getParamsJson())) {
             return null;
         }
+
         try {
             return objectMapper.readTree(action.getParamsJson());
         } catch (IOException e) {
@@ -237,15 +272,171 @@ public class GatherTaskRewardGenerator {
         }
 
         ActionRewardConfig config = new ActionRewardConfig();
-        config.setItemCode(snapshot.getItemCode());
         config.setSkillCode(snapshot.getSkillCode());
         config.setExpGain(snapshot.getExpGain());
         config.setCriticalRate(snapshot.getCriticalRate());
         config.setQuantityChance1(snapshot.getQuantityChance1());
         config.setQuantityChance2(snapshot.getQuantityChance2());
         config.setQuantityChance3(snapshot.getQuantityChance3());
+
+        List<ActionRewardItemConfig> rewardItems = readRewardItemConfigsFromSnapshot(snapshot);
+        config.setRewardItems(rewardItems);
+
+        if (rewardItems.size() == 1) {
+            config.setItemCode(rewardItems.get(0).getItemCode());
+        }
+
         validateRewardConfig(config);
         return config;
+    }
+
+    /**
+     * 从快照读取奖励列表。
+     *
+     * @param snapshot 采集快照
+     * @return 奖励列表
+     */
+    private List<ActionRewardItemConfig> readRewardItemConfigsFromSnapshot(GatherTaskStatSnapshot snapshot) {
+        List<ActionRewardItemConfig> result = new ArrayList<ActionRewardItemConfig>();
+        if (snapshot == null) {
+            return result;
+        }
+
+        if (StringUtils.hasText(snapshot.getRewardListJson())) {
+            try {
+                JsonNode root = objectMapper.readTree(snapshot.getRewardListJson());
+                if (root != null && root.isArray()) {
+                    for (int i = 0; i < root.size(); i += 1) {
+                        JsonNode itemNode = root.get(i);
+                        ActionRewardItemConfig itemConfig = buildRewardItemConfig(itemNode);
+                        if (itemConfig != null) {
+                            result.add(itemConfig);
+                        }
+                    }
+                }
+            } catch (IOException e) {
+                throw new IllegalStateException("采集快照 rewardListJson 解析失败", e);
+            }
+        }
+
+        if (!result.isEmpty()) {
+            return result;
+        }
+
+        if (StringUtils.hasText(snapshot.getItemCode())) {
+            ActionRewardItemConfig itemConfig = new ActionRewardItemConfig();
+            itemConfig.setItemCode(snapshot.getItemCode().trim());
+            itemConfig.setChance(FULL_PERCENT);
+            result.add(itemConfig);
+        }
+
+        return result;
+    }
+
+    /**
+     * 从动作 params 中读取奖励列表。
+     *
+     * 支持两种格式：
+     * 1. 单采：itemCode
+     * 2. 混采：rewardList:[{itemCode,chance}]
+     *
+     * @param root JSON 根节点
+     * @return 奖励列表
+     */
+    private List<ActionRewardItemConfig> readRewardItemConfigsFromRoot(JsonNode root) {
+        List<ActionRewardItemConfig> result = new ArrayList<ActionRewardItemConfig>();
+        if (root == null) {
+            return result;
+        }
+
+        JsonNode rewardListNode = root.get("rewardList");
+        if (rewardListNode != null && rewardListNode.isArray()) {
+            for (int i = 0; i < rewardListNode.size(); i += 1) {
+                JsonNode itemNode = rewardListNode.get(i);
+                ActionRewardItemConfig itemConfig = buildRewardItemConfig(itemNode);
+                if (itemConfig != null) {
+                    result.add(itemConfig);
+                }
+            }
+            return result;
+        }
+
+        String itemCode = readText(root, "itemCode");
+        if (StringUtils.hasText(itemCode)) {
+            ActionRewardItemConfig itemConfig = new ActionRewardItemConfig();
+            itemConfig.setItemCode(itemCode);
+            itemConfig.setChance(FULL_PERCENT);
+            result.add(itemConfig);
+        }
+
+        return result;
+    }
+
+    /**
+     * 构建单条奖励项配置。
+     *
+     * @param itemNode 奖励项 JSON
+     * @return 奖励项配置
+     */
+    private ActionRewardItemConfig buildRewardItemConfig(JsonNode itemNode) {
+        if (itemNode == null || itemNode.isNull()) {
+            return null;
+        }
+
+        String itemCode = readText(itemNode, "itemCode");
+        if (!StringUtils.hasText(itemCode)) {
+            itemCode = readText(itemNode, "rewardCode");
+        }
+        if (!StringUtils.hasText(itemCode)) {
+            return null;
+        }
+
+        BigDecimal chance = readDecimal(itemNode, "chance");
+        if (chance == null) {
+            chance = readDecimal(itemNode, "weight");
+        }
+        if (chance == null) {
+            chance = readDecimal(itemNode, "rate");
+        }
+        if (chance == null) {
+            chance = readDecimal(itemNode, "probability");
+        }
+
+        ActionRewardItemConfig config = new ActionRewardItemConfig();
+        config.setItemCode(itemCode);
+        config.setChance(chance);
+        return config;
+    }
+
+    /**
+     * 按轮次选择本轮产物。
+     *
+     * @param task 采集任务
+     * @param roundIndex 轮次
+     * @param config 奖励配置
+     * @return 选中的奖励项
+     */
+    private ActionRewardItemConfig rollRewardItem(PlayerGatherTask task, long roundIndex, ActionRewardConfig config) {
+        List<ActionRewardItemConfig> rewardItems = config.getRewardItems();
+        if (rewardItems == null || rewardItems.isEmpty()) {
+            return null;
+        }
+
+        if (rewardItems.size() == 1) {
+            return rewardItems.get(0);
+        }
+
+        long rollBasisPoint = nextPositiveValue(task.getRewardSeed(), roundIndex, 3) % 10000L;
+        long cumulative = 0L;
+        for (int i = 0; i < rewardItems.size(); i += 1) {
+            ActionRewardItemConfig itemConfig = rewardItems.get(i);
+            cumulative += toBasisPoint(itemConfig.getChance());
+            if (rollBasisPoint < cumulative) {
+                return itemConfig;
+            }
+        }
+
+        return rewardItems.get(rewardItems.size() - 1);
     }
 
     /**
@@ -306,7 +497,7 @@ public class GatherTaskRewardGenerator {
         long extra = 0L;
         BigDecimal remaining = criticalRate;
         while (remaining.compareTo(FULL_PERCENT) >= 0) {
-            extra++;
+            extra += 1L;
             remaining = remaining.subtract(FULL_PERCENT);
         }
 
@@ -317,7 +508,7 @@ public class GatherTaskRewardGenerator {
         long remainderBasisPoint = toBasisPoint(remaining);
         long rollBasisPoint = nextPositiveValue(task.getRewardSeed(), roundIndex, 2) % 10000L;
         if (rollBasisPoint < remainderBasisPoint) {
-            extra++;
+            extra += 1L;
         }
         return extra;
     }
@@ -347,6 +538,7 @@ public class GatherTaskRewardGenerator {
         if (valueNode == null || valueNode.isNull()) {
             return null;
         }
+
         String value = valueNode.asText();
         if (!StringUtils.hasText(value)) {
             return null;
@@ -366,9 +558,11 @@ public class GatherTaskRewardGenerator {
         if (valueNode == null || valueNode.isNull()) {
             return null;
         }
+
         if (valueNode.isInt() || valueNode.isLong()) {
             return valueNode.asInt();
         }
+
         String text = valueNode.asText();
         if (!StringUtils.hasText(text)) {
             return null;
@@ -388,6 +582,7 @@ public class GatherTaskRewardGenerator {
         if (valueNode == null || valueNode.isNull()) {
             return null;
         }
+
         String text = valueNode.asText();
         if (!StringUtils.hasText(text)) {
             return null;
@@ -404,23 +599,66 @@ public class GatherTaskRewardGenerator {
         if (config == null) {
             throw new IllegalArgumentException("奖励配置不能为空");
         }
-        if (!StringUtils.hasText(config.getItemCode())) {
-            throw new IllegalStateException("奖励配置缺少 itemCode");
+
+        List<ActionRewardItemConfig> rewardItems = config.getRewardItems();
+        if (rewardItems == null) {
+            rewardItems = new ArrayList<ActionRewardItemConfig>();
+            config.setRewardItems(rewardItems);
         }
+
+        if (rewardItems.isEmpty() && StringUtils.hasText(config.getItemCode())) {
+            ActionRewardItemConfig itemConfig = new ActionRewardItemConfig();
+            itemConfig.setItemCode(config.getItemCode().trim());
+            itemConfig.setChance(FULL_PERCENT);
+            rewardItems.add(itemConfig);
+        }
+
+        if (rewardItems.isEmpty()) {
+            throw new IllegalStateException("奖励配置缺少 rewardList/itemCode");
+        }
+
+        if (rewardItems.size() == 1 && rewardItems.get(0).getChance() == null) {
+            rewardItems.get(0).setChance(FULL_PERCENT);
+        }
+
+        BigDecimal rewardChanceTotal = BigDecimal.ZERO;
+        for (int i = 0; i < rewardItems.size(); i += 1) {
+            ActionRewardItemConfig itemConfig = rewardItems.get(i);
+            if (itemConfig == null || !StringUtils.hasText(itemConfig.getItemCode())) {
+                throw new IllegalStateException("奖励配置缺少 itemCode");
+            }
+            if (itemConfig.getChance() == null) {
+                throw new IllegalStateException("奖励配置缺少 chance，itemCode=" + itemConfig.getItemCode());
+            }
+            rewardChanceTotal = rewardChanceTotal.add(itemConfig.getChance());
+        }
+
+        if (rewardChanceTotal.compareTo(FULL_PERCENT) != 0) {
+            throw new IllegalStateException("奖励配置 rewardList 概率之和必须等于100");
+        }
+
         if (config.getQuantityChance1() == null || config.getQuantityChance2() == null || config.getQuantityChance3() == null) {
             throw new IllegalStateException("奖励配置缺少基础爆率");
         }
-        BigDecimal total = config.getQuantityChance1()
+
+        BigDecimal quantityChanceTotal = config.getQuantityChance1()
                 .add(config.getQuantityChance2())
                 .add(config.getQuantityChance3());
-        if (total.compareTo(FULL_PERCENT) != 0) {
-            throw new IllegalStateException("奖励配置基础爆率之和必须等于100，itemCode=" + config.getItemCode());
+        if (quantityChanceTotal.compareTo(FULL_PERCENT) != 0) {
+            throw new IllegalStateException("奖励配置基础爆率之和必须等于100");
         }
+
         if (config.getCriticalRate() == null) {
             config.setCriticalRate(BigDecimal.ZERO);
         }
         if (config.getExpGain() == null) {
             config.setExpGain(0);
+        }
+
+        if (rewardItems.size() == 1) {
+            config.setItemCode(rewardItems.get(0).getItemCode());
+        } else {
+            config.setItemCode(null);
         }
     }
 
@@ -440,7 +678,33 @@ public class GatherTaskRewardGenerator {
         copy.setQuantityChance1(source.getQuantityChance1());
         copy.setQuantityChance2(source.getQuantityChance2());
         copy.setQuantityChance3(source.getQuantityChance3());
+        copy.setRewardItems(copyRewardItemList(source.getRewardItems()));
         return copy;
+    }
+
+    /**
+     * 深拷贝奖励项列表。
+     *
+     * @param source 原列表
+     * @return 新列表
+     */
+    private List<ActionRewardItemConfig> copyRewardItemList(List<ActionRewardItemConfig> source) {
+        List<ActionRewardItemConfig> result = new ArrayList<ActionRewardItemConfig>();
+        if (source == null || source.isEmpty()) {
+            return result;
+        }
+
+        for (int i = 0; i < source.size(); i += 1) {
+            ActionRewardItemConfig sourceItem = source.get(i);
+            if (sourceItem == null) {
+                continue;
+            }
+            ActionRewardItemConfig copyItem = new ActionRewardItemConfig();
+            copyItem.setItemCode(sourceItem.getItemCode());
+            copyItem.setChance(sourceItem.getChance());
+            result.add(copyItem);
+        }
+        return result;
     }
 
     /**
@@ -489,7 +753,8 @@ public class GatherTaskRewardGenerator {
         private String actionCode;
 
         /**
-         * 产出物编码。
+         * 单采产出物编码。
+         * 为兼容旧逻辑保留；混采时允许为空。
          */
         private String itemCode;
 
@@ -522,5 +787,28 @@ public class GatherTaskRewardGenerator {
          * 产出3个的概率。
          */
         private BigDecimal quantityChance3;
+
+        /**
+         * 候选奖励项列表。
+         */
+        private List<ActionRewardItemConfig> rewardItems;
+    }
+
+    /**
+     * 单条候选奖励项配置。
+     */
+    @Data
+    public static class ActionRewardItemConfig {
+
+        /**
+         * 物品编码。
+         */
+        private String itemCode;
+
+        /**
+         * 被抽中的概率。
+         * 单位：百分比。
+         */
+        private BigDecimal chance;
     }
 }

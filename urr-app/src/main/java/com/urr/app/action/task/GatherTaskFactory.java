@@ -97,7 +97,15 @@ public class GatherTaskFactory {
         snapshot.setGatherEfficiency(BigDecimal.ONE);
         snapshot.setOfflineMinutesLimit(offlineMinutesLimit);
         snapshot.setRewardSeed(rewardSeed);
-        snapshot.setItemCode(rewardConfig.getItemCode());
+
+        snapshot.setRewardListJson(gatherTaskRewardGenerator.buildSnapshotRewardListJson(rewardConfig));
+
+        if (rewardConfig.getRewardItems() != null && rewardConfig.getRewardItems().size() == 1) {
+            snapshot.setItemCode(rewardConfig.getRewardItems().get(0).getItemCode());
+        } else {
+            snapshot.setItemCode(null);
+        }
+
         snapshot.setSkillCode(rewardConfig.getSkillCode());
         snapshot.setExpGain(rewardConfig.getExpGain());
         snapshot.setCriticalRate(rewardConfig.getCriticalRate());
