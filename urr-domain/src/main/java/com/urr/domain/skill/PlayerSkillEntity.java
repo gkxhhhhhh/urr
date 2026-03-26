@@ -25,6 +25,11 @@ public class PlayerSkillEntity {
     private Long playerId;
 
     /**
+     * 区服ID。
+     */
+    private Integer serverId;
+
+    /**
      * 技能ID。
      */
     private Long skillId;
@@ -38,6 +43,11 @@ public class PlayerSkillEntity {
      * 技能经验。
      */
     private Long skillExp;
+
+    /**
+     * 乐观锁版本号。
+     */
+    private Integer version;
 
     /**
      * 逻辑删除标记。

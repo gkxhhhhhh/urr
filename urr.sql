@@ -1214,4 +1214,195 @@ INSERT INTO `t_urr_wallet_flow` VALUES (9, 1, 1, 'GOLD', 10, 31, 'MARKET_BUY_REF
 INSERT INTO `t_urr_wallet_flow` VALUES (10, 1, 1, 'GOLD', -2, 29, 'MARKET_BUY', 'ORDER', 9, '9204c31b18574433887e4ce14d2b77f3', '2026-03-14 16:13:08', NULL, '-1', '2026-03-14 16:13:07', '-1', '2026-03-14 16:13:07', 0);
 INSERT INTO `t_urr_wallet_flow` VALUES (11, 1, 1, 'GOLD', 15, 44, 'DUNGEON', 'DUNGEON', 1, 'ada18d6c35c443179e67ceae8cbaf221', '2026-03-16 10:38:19', 'battle wave reward', '2', '2026-03-16 10:38:19', '2', '2026-03-16 10:38:19', 0);
 
+
+
+
+-- =============================================
+-- URR 挖矿链路增量 SQL
+-- 基于当前 GitHub urr.sql 的最小闭环增量：
+-- 1. 左导航仍沿用 MINING 行为编码，前端把展示名改成“挖矿”
+-- 2. 补齐 7 个挖矿动作
+-- 3. 补齐 7 个矿石物品定义
+-- 4. 采集奖励配置改为写入 t_urr_action_def.params_json，项目启动时加载
+-- 5. 采集经验真实入库，等级规则从 t_urr_skill_def.meta_json 读取
+-- =============================================
+
+-- ----------------------------
+-- 1）技能经验曲线配置
+-- 当前实现读取 meta_json.levelExpPerLevel。
+-- 这里先把挖矿技能配置成“每100经验升1级”。
+-- ----------------------------
+UPDATE `t_urr_skill_def`
+SET `meta_json` = JSON_OBJECT('levelExpPerLevel', 100),
+    `update_user` = '-1',
+    `update_time` = NOW()
+WHERE `skill_code` = 'SKL_MINING'
+  AND `delete_flag` = 0;
+
+-- ----------------------------
+-- 2）把旧示例采集动作切到数据库奖励配置，去掉 Java 硬编码依赖
+-- 这些动作本轮不接技能经验，所以 skillCode / expGain 留空。
+-- ----------------------------
+UPDATE `t_urr_action_def`
+SET `params_json` = JSON_OBJECT(
+        'entry', 'sample',
+        'kind', 'food',
+        'itemCode', 'FOOD_EGG',
+        'criticalRate', 0,
+        'quantityChance1', 100,
+        'quantityChance2', 0,
+        'quantityChance3', 0
+                    ),
+    `update_user` = '-1',
+    `update_time` = NOW()
+WHERE `action_code` = 'GATHER_PICKING_EGG'
+  AND `delete_flag` = 0;
+
+UPDATE `t_urr_action_def`
+SET `params_json` = JSON_OBJECT(
+        'entry', 'sample',
+        'kind', 'material',
+        'itemCode', 'MAT_COTTON',
+        'criticalRate', 0,
+        'quantityChance1', 100,
+        'quantityChance2', 0,
+        'quantityChance3', 0
+                    ),
+    `update_user` = '-1',
+    `update_time` = NOW()
+WHERE `action_code` = 'GATHER_PICKING_COTTON'
+  AND `delete_flag` = 0;
+
+UPDATE `t_urr_action_def`
+SET `params_json` = JSON_OBJECT(
+        'entry', 'sample',
+        'kind', 'food',
+        'itemCode', 'FOOD_COFFEE_BEAN',
+        'criticalRate', 0,
+        'quantityChance1', 100,
+        'quantityChance2', 0,
+        'quantityChance3', 0
+                    ),
+    `update_user` = '-1',
+    `update_time` = NOW()
+WHERE `action_code` = 'GATHER_PICKING_COFFEE_BEAN'
+  AND `delete_flag` = 0;
+
+-- ----------------------------
+-- 3）补齐挖矿产物物品定义
+-- 命名规则：见名知意、简洁、多个单词用下划线。
+-- ----------------------------
+INSERT INTO `t_urr_item_def`
+(`id`, `item_code`, `name_zh`, `name_en`, `item_type`, `rarity`, `stackable`, `max_stack`, `bind_type`, `tradeable`, `sell_price`, `meta_json`, `remarks`, `create_user`, `create_time`, `update_user`, `update_time`, `delete_flag`)
+VALUES
+    (5, 'ORE_CRUDE', '粗制矿石', 'Crude Ore', 3, 1, 1, 9999, 0, 1, 0, NULL, '挖矿产物-粗制矿石', '-1', NOW(), '-1', NOW(), 0),
+    (6, 'ORE_STANDARD', '标准矿石', 'Standard Ore', 3, 1, 1, 9999, 0, 1, 0, NULL, '挖矿产物-标准矿石', '-1', NOW(), '-1', NOW(), 0),
+    (7, 'ORE_REFINED', '精炼矿石', 'Refined Ore', 3, 1, 1, 9999, 0, 1, 0, NULL, '挖矿产物-精炼矿石', '-1', NOW(), '-1', NOW(), 0),
+    (8, 'ORE_ALLOY_STANDARD', '标准合金矿石', 'Standard Alloy Ore', 3, 1, 1, 9999, 0, 1, 0, NULL, '挖矿产物-标准合金矿石', '-1', NOW(), '-1', NOW(), 0),
+    (9, 'ORE_ALLOY_HIGH', '高强合金矿石', 'High Strength Alloy Ore', 3, 1, 1, 9999, 0, 1, 0, NULL, '挖矿产物-高强合金矿石', '-1', NOW(), '-1', NOW(), 0),
+    (10, 'ORE_ALLOY_RARE', '稀有合金矿石', 'Rare Alloy Ore', 3, 1, 1, 9999, 0, 1, 0, NULL, '挖矿产物-稀有合金矿石', '-1', NOW(), '-1', NOW(), 0),
+    (11, 'ORE_ALLOY_SACRED', '神圣合金矿石', 'Sacred Alloy Ore', 3, 1, 1, 9999, 0, 1, 0, NULL, '挖矿产物-神圣合金矿石', '-1', NOW(), '-1', NOW(), 0)
+    ON DUPLICATE KEY UPDATE
+                         `name_zh` = VALUES(`name_zh`),
+                         `name_en` = VALUES(`name_en`),
+                         `item_type` = VALUES(`item_type`),
+                         `rarity` = VALUES(`rarity`),
+                         `stackable` = VALUES(`stackable`),
+                         `max_stack` = VALUES(`max_stack`),
+                         `bind_type` = VALUES(`bind_type`),
+                         `tradeable` = VALUES(`tradeable`),
+                         `sell_price` = VALUES(`sell_price`),
+                         `remarks` = VALUES(`remarks`),
+                         `update_user` = VALUES(`update_user`),
+                         `update_time` = VALUES(`update_time`),
+                         `delete_flag` = VALUES(`delete_flag`);
+
+-- ----------------------------
+-- 4）重写挖矿动作定义
+-- 说明：
+-- 1. 直接复用现有 behavior_id=5 / category_id=3 / sub_category_id=4
+-- 2. 前端静态工作区会把分类/区域隐藏掉，只展示“挖矿 + 7个动作”
+-- 3. 奖励与经验配置统一写到 params_json
+-- ----------------------------
+UPDATE `t_urr_action_def`
+SET `action_code` = 'GATHER_MINING_CRUDE_ORE',
+    `action_name` = '粗制矿石',
+    `base_duration_ms` = 6000,
+    `min_skill_level` = 1,
+    `params_json` = JSON_OBJECT(
+            'entry', 'profession',
+            'professionCode', 'MINING',
+            'skillCode', 'SKL_MINING',
+            'itemCode', 'ORE_CRUDE',
+            'expGain', 5,
+            'criticalRate', 0,
+            'quantityChance1', 70,
+            'quantityChance2', 25,
+            'quantityChance3', 5
+                    ),
+    `remarks` = '挖矿动作-粗制矿石',
+    `update_user` = '-1',
+    `update_time` = NOW()
+WHERE `id` = 14;
+
+UPDATE `t_urr_action_def`
+SET `action_code` = 'GATHER_MINING_STANDARD_ORE',
+    `action_name` = '标准矿石',
+    `base_duration_ms` = 8000,
+    `min_skill_level` = 10,
+    `params_json` = JSON_OBJECT(
+            'entry', 'profession',
+            'professionCode', 'MINING',
+            'skillCode', 'SKL_MINING',
+            'itemCode', 'ORE_STANDARD',
+            'expGain', 6,
+            'criticalRate', 0,
+            'quantityChance1', 70,
+            'quantityChance2', 25,
+            'quantityChance3', 5
+                    ),
+    `remarks` = '挖矿动作-标准矿石',
+    `update_user` = '-1',
+    `update_time` = NOW()
+WHERE `id` = 15;
+
+INSERT INTO `t_urr_action_def`
+(`id`, `behavior_id`, `category_id`, `sub_category_id`, `action_code`, `action_name`, `status`, `action_kind`, `base_duration_ms`, `base_energy_cost`, `min_player_level`, `min_skill_level`, `unlock_condition_json`, `duration_scale_rule`, `reward_scale_rule`, `params_json`, `version`, `remarks`, `create_user`, `create_time`, `update_user`, `update_time`, `delete_flag`)
+VALUES
+    (16, 5, 3, 4, 'GATHER_MINING_REFINED_ORE', '精炼矿石', 1, 'LOOP', 11000, 0, 1, 20, NULL, NULL, NULL,
+     JSON_OBJECT('entry', 'profession', 'professionCode', 'MINING', 'skillCode', 'SKL_MINING', 'itemCode', 'ORE_REFINED', 'expGain', 11, 'criticalRate', 0, 'quantityChance1', 70, 'quantityChance2', 25, 'quantityChance3', 5),
+     0, '挖矿动作-精炼矿石', '-1', NOW(), '-1', NOW(), 0),
+    (17, 5, 3, 4, 'GATHER_MINING_STANDARD_ALLOY_ORE', '标准合金矿石', 1, 'LOOP', 14000, 0, 1, 35, NULL, NULL, NULL,
+     JSON_OBJECT('entry', 'profession', 'professionCode', 'MINING', 'skillCode', 'SKL_MINING', 'itemCode', 'ORE_ALLOY_STANDARD', 'expGain', 17, 'criticalRate', 0, 'quantityChance1', 70, 'quantityChance2', 25, 'quantityChance3', 5),
+     0, '挖矿动作-标准合金矿石', '-1', NOW(), '-1', NOW(), 0),
+    (18, 5, 3, 4, 'GATHER_MINING_HIGH_STRENGTH_ALLOY_ORE', '高强合金矿石', 1, 'LOOP', 17000, 0, 1, 50, NULL, NULL, NULL,
+     JSON_OBJECT('entry', 'profession', 'professionCode', 'MINING', 'skillCode', 'SKL_MINING', 'itemCode', 'ORE_ALLOY_HIGH', 'expGain', 28, 'criticalRate', 0, 'quantityChance1', 70, 'quantityChance2', 25, 'quantityChance3', 5),
+     0, '挖矿动作-高强合金矿石', '-1', NOW(), '-1', NOW(), 0),
+    (19, 5, 3, 4, 'GATHER_MINING_RARE_ALLOY_ORE', '稀有合金矿石', 1, 'LOOP', 20000, 0, 1, 65, NULL, NULL, NULL,
+     JSON_OBJECT('entry', 'profession', 'professionCode', 'MINING', 'skillCode', 'SKL_MINING', 'itemCode', 'ORE_ALLOY_RARE', 'expGain', 45, 'criticalRate', 0, 'quantityChance1', 70, 'quantityChance2', 25, 'quantityChance3', 5),
+     0, '挖矿动作-稀有合金矿石', '-1', NOW(), '-1', NOW(), 0),
+    (20, 5, 3, 4, 'GATHER_MINING_SACRED_ALLOY_ORE', '神圣合金矿石', 1, 'LOOP', 30000, 0, 1, 80, NULL, NULL, NULL,
+     JSON_OBJECT('entry', 'profession', 'professionCode', 'MINING', 'skillCode', 'SKL_MINING', 'itemCode', 'ORE_ALLOY_SACRED', 'expGain', 73, 'criticalRate', 0, 'quantityChance1', 70, 'quantityChance2', 25, 'quantityChance3', 5),
+     0, '挖矿动作-神圣合金矿石', '-1', NOW(), '-1', NOW(), 0)
+    ON DUPLICATE KEY UPDATE
+                         `behavior_id` = VALUES(`behavior_id`),
+                         `category_id` = VALUES(`category_id`),
+                         `sub_category_id` = VALUES(`sub_category_id`),
+                         `action_code` = VALUES(`action_code`),
+                         `action_name` = VALUES(`action_name`),
+                         `status` = VALUES(`status`),
+                         `action_kind` = VALUES(`action_kind`),
+                         `base_duration_ms` = VALUES(`base_duration_ms`),
+                         `base_energy_cost` = VALUES(`base_energy_cost`),
+                         `min_player_level` = VALUES(`min_player_level`),
+                         `min_skill_level` = VALUES(`min_skill_level`),
+                         `unlock_condition_json` = VALUES(`unlock_condition_json`),
+                         `duration_scale_rule` = VALUES(`duration_scale_rule`),
+                         `reward_scale_rule` = VALUES(`reward_scale_rule`),
+                         `params_json` = VALUES(`params_json`),
+                         `remarks` = VALUES(`remarks`),
+                         `update_user` = VALUES(`update_user`),
+                         `update_time` = VALUES(`update_time`),
+                         `delete_flag` = VALUES(`delete_flag`);
+
 SET FOREIGN_KEY_CHECKS = 1;

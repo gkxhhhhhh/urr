@@ -45,6 +45,11 @@ public class SkillDefEntity {
     private Integer maxLevel;
 
     /**
+     * 扩展配置。
+     */
+    private String metaJson;
+
+    /**
      * 逻辑删除标记。
      */
     @TableLogic

@@ -21,6 +21,7 @@ import java.io.IOException;
  * 3. flush 成功后，flushedCount 会推进到 completedCount。
  * 4. flush 成功后，pending_reward_pool 会清空。
  * 5. flush 本身不负责 stop；它只是一个可复用的最小正式入库能力。
+ * 6. 本次 flush 成功后，会同步把采集经验正式入账。
  */
 @Service
 @RequiredArgsConstructor
@@ -40,6 +41,11 @@ public class GatherTaskPendingRewardFlushService {
      * 正式库存入库适配器。
      */
     private final GatherTaskRewardMaterializer gatherTaskRewardMaterializer;
+
+    /**
+     * 采集经验正式入账服务。
+     */
+    private final GatherTaskSkillExpService gatherTaskSkillExpService;
 
     /**
      * JSON 编解码器。
@@ -74,6 +80,7 @@ public class GatherTaskPendingRewardFlushService {
 
         GatherTaskRewardPool rewardPool = readPendingRewardPool(task, pendingCache);
         int appliedRewardEntryCount = gatherTaskRewardMaterializer.materialize(task, rewardPool);
+        gatherTaskSkillExpService.applySkillExp(task, flushedRoundCount);
 
         task.setFlushedCount(task.getSafeCompletedCount());
         task.setPendingRewardPoolJson(null);

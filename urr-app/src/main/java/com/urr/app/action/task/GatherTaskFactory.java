@@ -7,6 +7,7 @@ import com.urr.domain.action.task.ActionTaskTypeEnum;
 import com.urr.domain.action.task.GatherTaskStatSnapshot;
 import com.urr.domain.action.task.PlayerGatherTask;
 import com.urr.domain.player.PlayerEntity;
+import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
@@ -19,10 +20,16 @@ import java.util.concurrent.ThreadLocalRandom;
  * 说明：
  * 1. 这里只做“启动时的一次性初始化组装”。
  * 2. 不负责数据库落库，不负责 Redis 写入。
- * 3. 当前仓库还没有完整的采集技能/装备加成真相表，所以先用最小中性快照占位。
+ * 3. 本次把动作对应的掉落配置和经验配置一并锁进快照，避免任务中途受配置变更影响。
  */
 @Component
+@RequiredArgsConstructor
 public class GatherTaskFactory {
+
+    /**
+     * 采集奖励生成器。
+     */
+    private final GatherTaskRewardGenerator gatherTaskRewardGenerator;
 
     /**
      * 组装一条“立即运行”的采集任务。
@@ -80,6 +87,9 @@ public class GatherTaskFactory {
     public GatherTaskStatSnapshot buildStatSnapshot(ActionDefEntity action,
                                                     Long rewardSeed,
                                                     int offlineMinutesLimit) {
+        GatherTaskRewardGenerator.ActionRewardConfig rewardConfig =
+                gatherTaskRewardGenerator.requireActionRewardConfig(action.getActionCode());
+
         GatherTaskStatSnapshot snapshot = new GatherTaskStatSnapshot();
         snapshot.setGatherLevel(resolveGatherLevel(action));
         snapshot.setEquipmentEffectSnapshotJson(buildDefaultEquipmentEffectSnapshotJson());
@@ -87,6 +97,13 @@ public class GatherTaskFactory {
         snapshot.setGatherEfficiency(BigDecimal.ONE);
         snapshot.setOfflineMinutesLimit(offlineMinutesLimit);
         snapshot.setRewardSeed(rewardSeed);
+        snapshot.setItemCode(rewardConfig.getItemCode());
+        snapshot.setSkillCode(rewardConfig.getSkillCode());
+        snapshot.setExpGain(rewardConfig.getExpGain());
+        snapshot.setCriticalRate(rewardConfig.getCriticalRate());
+        snapshot.setQuantityChance1(rewardConfig.getQuantityChance1());
+        snapshot.setQuantityChance2(rewardConfig.getQuantityChance2());
+        snapshot.setQuantityChance3(rewardConfig.getQuantityChance3());
         return snapshot;
     }
 
@@ -126,10 +143,6 @@ public class GatherTaskFactory {
 
     /**
      * 解析采集等级。
-     *
-     * 说明：
-     * 1. 当前仓库还没有采集技能真相表。
-     * 2. 这里先给一个最小可用值，后续再接真正的采集技能系统。
      *
      * @param action 动作定义
      * @return 当前采集等级
