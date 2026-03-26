@@ -41,7 +41,7 @@ import java.util.Objects;
  * 说明：
  * 1. 本类只做“开始采集 / 加入队列 / 停止当前采集任务”的最小编排。
  * 2. 启动和入队逻辑继续沿用会话 4/5/6/7 已经落地的能力。
- * 3. 停止当前任务时，直接复用现有 GatherTaskStopService，不重写 stop/flush 闭环。
+ * 3. 停止当前任务时，直接复用现有 GatherTaskStopService 做 stop 收口。
  * 4. 当前还没有做队列自动消费。
  */
 @Service
@@ -244,7 +244,7 @@ public class GatherTaskAppServiceImpl implements GatherTaskAppService {
     }
 
     /**
-     * 在替换旧采集任务前，先把它推进到当前时刻。
+     * 在替换旧采集任务前，先把它推进到当前时刻，并把已完成轮次实时入包。
      *
      * @param taskId 旧采集任务ID
      */
@@ -252,7 +252,7 @@ public class GatherTaskAppServiceImpl implements GatherTaskAppService {
         AdvanceGatherTaskCommand advanceCommand = new AdvanceGatherTaskCommand();
         advanceCommand.setTaskId(taskId);
         advanceCommand.setAdvanceTime(LocalDateTime.now());
-        gatherTaskAdvanceService.advanceTo(advanceCommand);
+        gatherTaskAdvanceService.advanceToAndApplyDelta(advanceCommand);
     }
 
     /**

@@ -26,9 +26,10 @@ import java.util.List;
  *
  * 说明：
  * 1. 这里专门负责“把当前采集任务按需推进到某个时刻”。
- * 2. 推进结果只落到 completedCount / lastSettleTime / pending_reward_pool / current segment。
- * 3. 本服务不负责 stop/flush 完整逻辑，不做正式库存入库。
- * 4. 推进前会先做一次运行态兜底恢复，确保 Redis 丢失后仍可继续推进。
+ * 2. 默认 advanceTo 仍然只落 completedCount / lastSettleTime / pending_reward_pool / current segment。
+ * 3. 新增 advanceToAndApplyDelta，专门给运行中实时入包使用。
+ * 4. 实时入包只消费“本次新增轮次的 delta 列表”，不会重复消费历史累计池。
+ * 5. 推进前会先做一次运行态兜底恢复，确保 Redis 丢失后仍可继续推进。
  */
 @Service
 public class GatherTaskAdvanceService {
@@ -64,6 +65,16 @@ public class GatherTaskAdvanceService {
     private final GatherTaskRuntimeRecoveryService gatherTaskRuntimeRecoveryService;
 
     /**
+     * 正式库存入库适配器。
+     */
+    private final GatherTaskRewardMaterializer gatherTaskRewardMaterializer;
+
+    /**
+     * 采集经验正式入账服务。
+     */
+    private final GatherTaskSkillExpService gatherTaskSkillExpService;
+
+    /**
      * JSON 编解码器。
      */
     private final ObjectMapper objectMapper;
@@ -77,6 +88,8 @@ public class GatherTaskAdvanceService {
      * @param gatherTaskPendingRewardAggregator 待刷收益池聚合器
      * @param gatherTaskSegmentPlanner 分段规划器
      * @param gatherTaskRuntimeRecoveryService 运行态恢复服务
+     * @param gatherTaskRewardMaterializer 正式库存入库适配器
+     * @param gatherTaskSkillExpService 采集经验正式入账服务
      * @param objectMapper JSON 编解码器
      */
     public GatherTaskAdvanceService(PlayerGatherTaskRepository playerGatherTaskRepository,
@@ -85,6 +98,8 @@ public class GatherTaskAdvanceService {
                                     GatherTaskPendingRewardAggregator gatherTaskPendingRewardAggregator,
                                     GatherTaskSegmentPlanner gatherTaskSegmentPlanner,
                                     GatherTaskRuntimeRecoveryService gatherTaskRuntimeRecoveryService,
+                                    GatherTaskRewardMaterializer gatherTaskRewardMaterializer,
+                                    GatherTaskSkillExpService gatherTaskSkillExpService,
                                     ObjectMapper objectMapper) {
         this.playerGatherTaskRepository = playerGatherTaskRepository;
         this.playerGatherTaskRedisRepository = playerGatherTaskRedisRepository;
@@ -92,6 +107,8 @@ public class GatherTaskAdvanceService {
         this.gatherTaskPendingRewardAggregator = gatherTaskPendingRewardAggregator;
         this.gatherTaskSegmentPlanner = gatherTaskSegmentPlanner;
         this.gatherTaskRuntimeRecoveryService = gatherTaskRuntimeRecoveryService;
+        this.gatherTaskRewardMaterializer = gatherTaskRewardMaterializer;
+        this.gatherTaskSkillExpService = gatherTaskSkillExpService;
         this.objectMapper = objectMapper;
     }
 
@@ -108,6 +125,34 @@ public class GatherTaskAdvanceService {
      */
     @Transactional(rollbackFor = Exception.class)
     public AdvanceGatherTaskResult advanceTo(AdvanceGatherTaskCommand command) {
+        return doAdvance(command, false);
+    }
+
+    /**
+     * 把当前采集任务推进到指定时刻，并把“本次新增 delta”实时入包。
+     *
+     * 说明：
+     * 1. 这个方法只给运行中实时刷新使用。
+     * 2. 历史 pending_reward_pool 会先补一次正式入库，然后清空。
+     * 3. 本次新增轮次只按 delta 列表实时入库，不再走累计池 flush。
+     * 4. 本次成功后，flushedCount 会直接推进到 completedCount。
+     *
+     * @param command 推进命令
+     * @return 推进结果
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public AdvanceGatherTaskResult advanceToAndApplyDelta(AdvanceGatherTaskCommand command) {
+        return doAdvance(command, true);
+    }
+
+    /**
+     * 执行一次推进。
+     *
+     * @param command 推进命令
+     * @param applyDelta 是否实时入包
+     * @return 推进结果
+     */
+    private AdvanceGatherTaskResult doAdvance(AdvanceGatherTaskCommand command, boolean applyDelta) {
         validateCommand(command);
 
         PlayerGatherTask task = playerGatherTaskRepository.findByTaskId(command.getTaskId());
@@ -146,16 +191,38 @@ public class GatherTaskAdvanceService {
         }
 
         LocalDateTime newLastSettleTime = resolveNewLastSettleTime(task.getLastSettleTime(), effectiveNow);
-
         boolean dbUpdated = false;
-        if (advancedRoundCount > 0L) {
-            List<GatherTaskRewardEntry> newRewardList = generateRewardList(task, beforeCompletedCount + 1L, shouldCompletedCount);
-            GatherTaskRewardPool rewardPool = readPendingRewardPool(task, pendingRewardPoolCache);
-            gatherTaskPendingRewardAggregator.mergeRewards(rewardPool, newRewardList);
 
-            task.setCompletedCount(shouldCompletedCount);
-            task.setPendingRewardPoolJson(writeJson(rewardPool));
-            dbUpdated = true;
+        if (applyDelta) {
+            boolean rewardApplied = applyHistoricalPendingIfNecessary(task, pendingRewardPoolCache);
+            if (advancedRoundCount > 0L) {
+                List<GatherTaskRewardEntry> newRewardList = generateRewardList(task,
+                        beforeCompletedCount + 1L,
+                        shouldCompletedCount);
+                gatherTaskRewardMaterializer.materialize(task, newRewardList);
+                gatherTaskSkillExpService.applySkillExp(task, advancedRoundCount);
+                rewardApplied = true;
+            }
+            if (rewardApplied || task.getSafeFlushedCount() != shouldCompletedCount || task.hasPendingRewardPool()) {
+                task.setFlushedCount(shouldCompletedCount);
+                task.setPendingRewardPoolJson(null);
+                dbUpdated = true;
+            }
+            if (advancedRoundCount > 0L) {
+                task.setCompletedCount(shouldCompletedCount);
+                dbUpdated = true;
+            }
+        } else {
+            if (advancedRoundCount > 0L) {
+                List<GatherTaskRewardEntry> newRewardList = generateRewardList(task,
+                        beforeCompletedCount + 1L,
+                        shouldCompletedCount);
+                GatherTaskRewardPool rewardPool = readPendingRewardPool(task, pendingRewardPoolCache);
+                gatherTaskPendingRewardAggregator.mergeRewards(rewardPool, newRewardList);
+                task.setCompletedCount(shouldCompletedCount);
+                task.setPendingRewardPoolJson(writeJson(rewardPool));
+                dbUpdated = true;
+            }
         }
 
         if (!sameTime(task.getLastSettleTime(), newLastSettleTime)) {
@@ -191,6 +258,30 @@ public class GatherTaskAdvanceService {
     }
 
     /**
+     * 把历史 pending_reward_pool 先补一次正式入库。
+     *
+     * @param task 采集任务
+     * @param pendingRewardPoolCache 待刷收益池缓存
+     * @return true-本次有正式入库，false-没有
+     */
+    private boolean applyHistoricalPendingIfNecessary(PlayerGatherTask task,
+                                                      GatherTaskPendingRewardPoolCache pendingRewardPoolCache) {
+        long pendingRoundCount = task.getPendingRewardRoundCount();
+        if (pendingRoundCount <= 0L) {
+            return false;
+        }
+
+        GatherTaskRewardPool rewardPool = readPendingRewardPool(task, pendingRewardPoolCache);
+        if (rewardPool == null || rewardPool.getSafeRewardList().isEmpty()) {
+            throw new IllegalStateException("存在待刷轮次，但 pending_reward_pool 为空，taskId=" + task.getId());
+        }
+
+        gatherTaskRewardMaterializer.materialize(task, rewardPool);
+        gatherTaskSkillExpService.applySkillExp(task, pendingRoundCount);
+        return true;
+    }
+
+    /**
      * 生成本次新增完成轮次的奖励列表。
      *
      * @param task 采集任务
@@ -207,7 +298,8 @@ public class GatherTaskAdvanceService {
         }
 
         for (long roundIndex = fromRoundIndex; roundIndex <= toRoundIndex; roundIndex++) {
-            List<GatherTaskRewardEntry> currentRoundRewardList = gatherTaskRewardGenerator.generateRoundRewards(task, roundIndex);
+            List<GatherTaskRewardEntry> currentRoundRewardList =
+                    gatherTaskRewardGenerator.generateRoundRewards(task, roundIndex);
             for (int i = 0; i < currentRoundRewardList.size(); i++) {
                 rewardList.add(currentRoundRewardList.get(i));
             }
@@ -291,7 +383,8 @@ public class GatherTaskAdvanceService {
         if (task.getStartTime() == null || effectiveNow == null) {
             return task.getSafeCompletedCount();
         }
-        if (task.getStatSnapshot() == null || task.getStatSnapshot().getGatherDurationMs() == null
+        if (task.getStatSnapshot() == null
+                || task.getStatSnapshot().getGatherDurationMs() == null
                 || task.getStatSnapshot().getGatherDurationMs() <= 0) {
             throw new IllegalStateException("采集任务缺少有效的 gatherDurationMs，taskId=" + task.getId());
         }
@@ -370,7 +463,9 @@ public class GatherTaskAdvanceService {
             playerGatherTaskRedisRepository.saveTaskHotState(task);
             return true;
         }
-        if (task.getCurrentSegmentStart() != null && task.getCurrentSegmentEnd() != null && segmentPlanCache == null) {
+        if (task.getCurrentSegmentStart() != null
+                && task.getCurrentSegmentEnd() != null
+                && segmentPlanCache == null) {
             playerGatherTaskRedisRepository.saveTaskHotState(task);
             return true;
         }

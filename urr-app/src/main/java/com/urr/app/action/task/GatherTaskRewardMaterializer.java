@@ -24,10 +24,10 @@ import java.util.List;
  * 采集收益正式入库适配器。
  *
  * 说明：
- * 1. 这里不是一套新的库存系统，只是把 pending_reward_pool 落到当前仓库已有正式表。
+ * 1. 这里不是一套新的库存系统，只是把收益落到当前仓库已有正式表。
  * 2. ITEM 走玩家堆叠物品表。
  * 3. CURRENCY 走钱包表 + 钱包流水表。
- * 4. 当前只做 stop/replace 所需的最小入库能力。
+ * 4. 当前同时支持“整个 pending_reward_pool 入库”和“本轮 delta 入库”两种方式。
  */
 @Component
 @RequiredArgsConstructor
@@ -80,9 +80,27 @@ public class GatherTaskRewardMaterializer {
         if (rewardPool == null) {
             return 0;
         }
+        return materialize(task, rewardPool.getSafeRewardList());
+    }
+
+    /**
+     * 把本次新增奖励列表正式写入库存。
+     *
+     * 说明：
+     * 1. 这个方法只消费“本次 delta 列表”，不会碰 pending_reward_pool。
+     * 2. 适合运行中实时入包，避免把历史累计池反复入包。
+     *
+     * @param task 采集任务
+     * @param rewardList 本次新增奖励列表
+     * @return 实际写入的奖励条目数
+     */
+    public int materialize(PlayerGatherTask task, List<GatherTaskRewardEntry> rewardList) {
+        validateTask(task);
+        if (rewardList == null || rewardList.isEmpty()) {
+            return 0;
+        }
 
         int appliedCount = 0;
-        List<GatherTaskRewardEntry> rewardList = rewardPool.getSafeRewardList();
         for (int i = 0; i < rewardList.size(); i++) {
             GatherTaskRewardEntry rewardEntry = rewardList.get(i);
             if (rewardEntry == null) {
@@ -110,7 +128,6 @@ public class GatherTaskRewardMaterializer {
     private void applyOneReward(PlayerGatherTask task, GatherTaskRewardEntry rewardEntry, long quantity) {
         String rewardType = normalizeText(rewardEntry.getRewardType());
         String rewardCode = normalizeText(rewardEntry.getRewardCode());
-
         if (!StringUtils.hasText(rewardType)) {
             throw new IllegalArgumentException("奖励类型不能为空，taskId=" + task.getId());
         }
@@ -126,7 +143,6 @@ public class GatherTaskRewardMaterializer {
             addCurrency(task, rewardCode, quantity);
             return;
         }
-
         throw new IllegalArgumentException("暂不支持的奖励类型，rewardType=" + rewardType + ", taskId=" + task.getId());
     }
 
@@ -146,7 +162,6 @@ public class GatherTaskRewardMaterializer {
             tryInsertNewItemStack(task, itemDef, quantity);
             return;
         }
-
         increaseExistingItemStack(stackEntity, quantity, task.getId(), itemCode);
     }
 
@@ -176,7 +191,8 @@ public class GatherTaskRewardMaterializer {
      */
     private void validateItemCanUseStackTable(ItemDefEntity itemDef, PlayerGatherTask task) {
         if (itemDef.getStackable() != null && itemDef.getStackable() == 0) {
-            throw new IllegalStateException("当前最小 flush 仅支持堆叠物品，itemCode=" + itemDef.getItemCode() + ", taskId=" + task.getId());
+            throw new IllegalStateException("当前最小 flush 仅支持堆叠物品，itemCode="
+                    + itemDef.getItemCode() + ", taskId=" + task.getId());
         }
     }
 
@@ -213,16 +229,17 @@ public class GatherTaskRewardMaterializer {
         stackEntity.setQty(quantity);
         stackEntity.setLocation(BAG_LOCATION);
         stackEntity.setRemarks(buildItemRemarks(task.getId(), itemDef.getItemCode(), quantity));
-
         try {
             int rows = playerItemStackMapper.insert(stackEntity);
             if (rows != 1) {
-                throw new IllegalStateException("插入玩家物品堆叠记录失败，taskId=" + task.getId() + ", itemCode=" + itemDef.getItemCode());
+                throw new IllegalStateException("插入玩家物品堆叠记录失败，taskId="
+                        + task.getId() + ", itemCode=" + itemDef.getItemCode());
             }
         } catch (DuplicateKeyException e) {
             PlayerItemStackEntity current = findItemStack(task.getPlayerId(), itemDef.getId(), BAG_LOCATION);
             if (current == null) {
-                throw new IllegalStateException("玩家物品堆叠记录重复后仍未读到记录，taskId=" + task.getId() + ", itemCode=" + itemDef.getItemCode(), e);
+                throw new IllegalStateException("玩家物品堆叠记录重复后仍未读到记录，taskId="
+                        + task.getId() + ", itemCode=" + itemDef.getItemCode(), e);
             }
             increaseExistingItemStack(current, quantity, task.getId(), itemDef.getItemCode());
         }
@@ -236,11 +253,13 @@ public class GatherTaskRewardMaterializer {
      * @param taskId 任务ID
      * @param itemCode 物品编码
      */
-    private void increaseExistingItemStack(PlayerItemStackEntity stackEntity, long quantity, Long taskId, String itemCode) {
+    private void increaseExistingItemStack(PlayerItemStackEntity stackEntity,
+                                           long quantity,
+                                           Long taskId,
+                                           String itemCode) {
         long oldQty = stackEntity.getQty() == null ? 0L : stackEntity.getQty();
         stackEntity.setQty(oldQty + quantity);
         stackEntity.setRemarks(buildItemRemarks(taskId, itemCode, quantity));
-
         int rows = playerItemStackMapper.updateById(stackEntity);
         if (rows != 1) {
             throw new IllegalStateException("更新玩家物品堆叠记录失败，taskId=" + taskId + ", itemCode=" + itemCode);
@@ -272,7 +291,6 @@ public class GatherTaskRewardMaterializer {
         if (walletEntity == null) {
             return tryInsertNewWallet(task, currencyCode, quantity);
         }
-
         return increaseExistingWallet(walletEntity, currencyCode, quantity, task.getId());
     }
 
@@ -307,7 +325,6 @@ public class GatherTaskRewardMaterializer {
         walletEntity.setCurrencyCode(currencyCode);
         walletEntity.setBalance(quantity);
         walletEntity.setRemarks(buildWalletRemarks(task.getId(), currencyCode, quantity));
-
         try {
             int rows = walletMapper.insert(walletEntity);
             if (rows != 1) {
@@ -317,7 +334,8 @@ public class GatherTaskRewardMaterializer {
         } catch (DuplicateKeyException e) {
             WalletEntity current = findWallet(task.getPlayerId(), currencyCode);
             if (current == null) {
-                throw new IllegalStateException("钱包记录重复后仍未读到记录，taskId=" + task.getId() + ", currencyCode=" + currencyCode, e);
+                throw new IllegalStateException("钱包记录重复后仍未读到记录，taskId="
+                        + task.getId() + ", currencyCode=" + currencyCode, e);
             }
             return increaseExistingWallet(current, currencyCode, quantity, task.getId());
         }
@@ -332,12 +350,14 @@ public class GatherTaskRewardMaterializer {
      * @param taskId 任务ID
      * @return 变更后余额
      */
-    private long increaseExistingWallet(WalletEntity walletEntity, String currencyCode, long quantity, Long taskId) {
+    private long increaseExistingWallet(WalletEntity walletEntity,
+                                        String currencyCode,
+                                        long quantity,
+                                        Long taskId) {
         long oldBalance = walletEntity.getBalance() == null ? 0L : walletEntity.getBalance();
         long newBalance = oldBalance + quantity;
         walletEntity.setBalance(newBalance);
         walletEntity.setRemarks(buildWalletRemarks(taskId, currencyCode, quantity));
-
         int rows = walletMapper.updateById(walletEntity);
         if (rows != 1) {
             throw new IllegalStateException("更新钱包失败，taskId=" + taskId + ", currencyCode=" + currencyCode);
@@ -353,7 +373,10 @@ public class GatherTaskRewardMaterializer {
      * @param quantity 增加数量
      * @param balanceAfter 变更后余额
      */
-    private void insertWalletFlow(PlayerGatherTask task, String currencyCode, long quantity, long balanceAfter) {
+    private void insertWalletFlow(PlayerGatherTask task,
+                                  String currencyCode,
+                                  long quantity,
+                                  long balanceAfter) {
         WalletFlowEntity flowEntity = new WalletFlowEntity();
         flowEntity.setPlayerId(task.getPlayerId());
         flowEntity.setServerId(task.getServerId());
@@ -366,7 +389,6 @@ public class GatherTaskRewardMaterializer {
         flowEntity.setRequestId(buildWalletRequestId(task.getId(), currencyCode, task.getSafeCompletedCount()));
         flowEntity.setFlowTime(LocalDateTime.now());
         flowEntity.setRemarks(buildWalletRemarks(task.getId(), currencyCode, quantity));
-
         int rows = walletFlowMapper.insert(flowEntity);
         if (rows != 1) {
             throw new IllegalStateException("插入钱包流水失败，taskId=" + task.getId() + ", currencyCode=" + currencyCode);

@@ -1,7 +1,7 @@
 package com.urr.app.action.task;
 
 import com.urr.app.action.task.command.AdvanceGatherTaskCommand;
-import com.urr.app.action.task.result.PendingRewardFlushResult;
+import com.urr.app.action.task.result.AdvanceGatherTaskResult;
 import com.urr.app.action.task.result.StopGatherTaskResult;
 import com.urr.domain.action.task.ActionTaskStatusEnum;
 import com.urr.domain.action.task.ActionTaskStopReasonEnum;
@@ -18,7 +18,7 @@ import java.time.LocalDateTime;
  *
  * 说明：
  * 1. 这里承接 stop / replace 共用的最小闭环。
- * 2. 顺序固定为：先 advance，再 flush，再 stop，再清 Redis 热态。
+ * 2. 顺序固定为：先按完成边界 advance 并实时入包，再 stop，再清 Redis 热态。
  * 3. 本次在 stop 收口后，补“尝试自动拉起队列下一条”的最小闭环。
  */
 @Slf4j
@@ -42,11 +42,6 @@ public class GatherTaskStopService {
     private final GatherTaskAdvanceService gatherTaskAdvanceService;
 
     /**
-     * 采集任务 pending flush 服务。
-     */
-    private final GatherTaskPendingRewardFlushService gatherTaskPendingRewardFlushService;
-
-    /**
      * 队列自动拉起服务。
      */
     private final GatherTaskQueueAutoStartService gatherTaskQueueAutoStartService;
@@ -67,9 +62,9 @@ public class GatherTaskStopService {
 
         LocalDateTime operateTime = stopTime == null ? LocalDateTime.now() : stopTime;
         PlayerGatherTask task = requireRunningTask(taskId);
+        long beforeFlushedCount = task.getSafeFlushedCount();
 
-        advanceToCurrentTime(task.getId(), operateTime);
-        PendingRewardFlushResult flushResult = gatherTaskPendingRewardFlushService.flushPendingReward(task.getId());
+        AdvanceGatherTaskResult advanceResult = advanceToCurrentTimeAndApplyDelta(task.getId(), operateTime);
 
         PlayerGatherTask latestTask = playerGatherTaskRepository.findByTaskId(task.getId());
         if (latestTask == null) {
@@ -84,20 +79,25 @@ public class GatherTaskStopService {
         playerGatherTaskRedisRepository.deleteTaskHotState(latestTask.getPlayerId(), latestTask.getId());
         safeTryStartNextQueuedTask(latestTask.getPlayerId(), stopReason);
 
-        return buildResult(latestTask, flushResult, operateTime);
+        return buildResult(latestTask, advanceResult, beforeFlushedCount, operateTime);
     }
 
     /**
-     * 在 stop 前先推进到当前时刻。
+     * 在 stop 前先推进到当前时刻，并且只把本次已完成轮次实时入包。
+     *
+     * 说明：
+     * 1. 未达到完成边界的那一轮，不会在这里提前发奖。
+     * 2. 旧的 flush 闭环不再参与 stop 收口，避免把累计池再次正式入库。
      *
      * @param taskId 任务ID
      * @param operateTime 操作时间
+     * @return 推进结果
      */
-    private void advanceToCurrentTime(Long taskId, LocalDateTime operateTime) {
+    private AdvanceGatherTaskResult advanceToCurrentTimeAndApplyDelta(Long taskId, LocalDateTime operateTime) {
         AdvanceGatherTaskCommand command = new AdvanceGatherTaskCommand();
         command.setTaskId(taskId);
         command.setAdvanceTime(operateTime);
-        gatherTaskAdvanceService.advanceTo(command);
+        return gatherTaskAdvanceService.advanceToAndApplyDelta(command);
     }
 
     /**
@@ -121,13 +121,20 @@ public class GatherTaskStopService {
      * 组装停止结果。
      *
      * @param task 最新任务状态
-     * @param flushResult flush 结果
+     * @param advanceResult 停止前推进结果
+     * @param beforeFlushedCount 停止前已正式入库轮次
      * @param stopTime 停止时间
      * @return 停止结果
      */
     private StopGatherTaskResult buildResult(PlayerGatherTask task,
-                                             PendingRewardFlushResult flushResult,
+                                             AdvanceGatherTaskResult advanceResult,
+                                             long beforeFlushedCount,
                                              LocalDateTime stopTime) {
+        long flushedRoundCount = task.getSafeFlushedCount() - beforeFlushedCount;
+        if (flushedRoundCount < 0L) {
+            flushedRoundCount = 0L;
+        }
+
         StopGatherTaskResult result = new StopGatherTaskResult();
         result.setTaskId(task.getId());
         result.setPlayerId(task.getPlayerId());
@@ -135,9 +142,9 @@ public class GatherTaskStopService {
         result.setStopReason(task.getStopReason() == null ? null : task.getStopReason().getCode());
         result.setCompletedCount(task.getSafeCompletedCount());
         result.setFlushedCount(task.getSafeFlushedCount());
-        result.setFlushedRoundCount(flushResult == null ? 0L : flushResult.getFlushedRoundCount());
-        result.setAppliedRewardEntryCount(flushResult == null ? 0 : flushResult.getAppliedRewardEntryCount());
-        result.setRewardFlushed(flushResult != null && Boolean.TRUE.equals(flushResult.getRewardFlushed()));
+        result.setFlushedRoundCount(flushedRoundCount);
+        result.setAppliedRewardEntryCount(0);
+        result.setRewardFlushed(flushedRoundCount > 0L);
         result.setStopTime(stopTime);
         return result;
     }

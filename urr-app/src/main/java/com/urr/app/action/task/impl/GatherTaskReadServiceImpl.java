@@ -236,7 +236,7 @@ public class GatherTaskReadServiceImpl implements GatherTaskReadService {
         AdvanceGatherTaskCommand command = new AdvanceGatherTaskCommand();
         command.setTaskId(gatherTask.getId());
         command.setAdvanceTime(readTime);
-        gatherTaskAdvanceService.advanceTo(command);
+        gatherTaskAdvanceService.advanceToAndApplyDelta(command);
 
         PlayerGatherTask latestTask = playerGatherTaskRepository.findByTaskId(gatherTask.getId());
         if (latestTask != null
@@ -327,7 +327,12 @@ public class GatherTaskReadServiceImpl implements GatherTaskReadService {
         if (!StringUtils.hasText(rewardPoolJson)) {
             rewardPoolJson = task.getPendingRewardPoolJson();
         }
-        data.setRewardList(parseRewardList(rewardPoolJson));
+
+        List<RewardAmount> rewardList = parseRewardList(rewardPoolJson);
+        if (data.getPendingRoundCount() == null || data.getPendingRoundCount() <= 0L) {
+            rewardList = new ArrayList<RewardAmount>();
+        }
+        data.setRewardList(rewardList);
         return data;
     }
 
@@ -619,6 +624,9 @@ public class GatherTaskReadServiceImpl implements GatherTaskReadService {
         }
         for (int i = 0; i < pendingTaskList.size(); i++) {
             PendingRewardData data = loadPendingRewardDataByTask(pendingTaskList.get(i));
+            if (!data.hasPending()) {
+                continue;
+            }
             for (int j = 0; j < data.getRewardList().size(); j++) {
                 RewardAmount rewardAmount = data.getRewardList().get(j);
                 mergeAmount(result, buildRewardKey(rewardAmount.getRewardType(), rewardAmount.getRewardCode()), rewardAmount.getQuantity());
