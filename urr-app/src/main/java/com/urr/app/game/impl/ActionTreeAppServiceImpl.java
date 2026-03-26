@@ -219,7 +219,7 @@ public class ActionTreeAppServiceImpl implements ActionTreeAppService {
                 continue;
             }
 
-            ActionTreeResponseDTO.TreeNode node = buildBehaviorNode(behavior);
+            ActionTreeResponseDTO.TreeNode node = buildBehaviorNode(behavior, skillIdByCode, playerSkillLevelBySkillId);
             node.setParentNodeKey(parent.getNodeKey());
             parent.getChildren().add(node);
             behaviorNodeById.put(behavior.getId(), node);
@@ -434,7 +434,11 @@ public class ActionTreeAppServiceImpl implements ActionTreeAppService {
      * @param entity 行为定义
      * @return 树节点
      */
-    private ActionTreeResponseDTO.TreeNode buildBehaviorNode(BehaviorDefEntity entity) {
+    private ActionTreeResponseDTO.TreeNode buildBehaviorNode(
+            BehaviorDefEntity entity,
+            Map<String, Long> skillIdByCode,
+            Map<Long, Integer> playerSkillLevelBySkillId
+    ) {
         ActionTreeResponseDTO.TreeNode node = baseNode(
                 entity.getId(),
                 NODE_BEHAVIOR,
@@ -449,10 +453,28 @@ public class ActionTreeAppServiceImpl implements ActionTreeAppService {
         }
 
         Map<String, Object> meta = buildSimpleMeta(entity.getParamsJson());
+        Map<String, Object> params = extractParamsMap(meta);
+
+        String bindSkillCode = extractString(params, "bindSkillCode");
+        if (!StringUtils.hasText(bindSkillCode)) {
+            bindSkillCode = extractString(params, "skillCode");
+        }
+
         meta.put("groupCode", entity.getGroupCode());
         meta.put("settleGranularitySec", defaultInt(entity.getSettleGranularitySec(), 1));
         meta.put("allowParallel", defaultInt(entity.getAllowParallel(), 0) == 1);
+        meta.put("nav", extractBoolean(params, "nav"));
+        meta.put("icon", extractString(params, "icon"));
+        meta.put("showLevel", extractBoolean(params, "showLevel"));
+        meta.put("workspaceMode", extractString(params, "workspaceMode"));
+        meta.put("bindSkillCode", bindSkillCode);
+        meta.put("skillCode", bindSkillCode);
+        meta.put("currentSkillLevel", resolvePlayerSkillLevel(bindSkillCode, skillIdByCode, playerSkillLevelBySkillId));
         node.setMeta(meta);
+
+        if (shouldKeepBehaviorUnlocked(node)) {
+            node.setUnlocked(true);
+        }
         return node;
     }
 
@@ -655,6 +677,8 @@ public class ActionTreeAppServiceImpl implements ActionTreeAppService {
             List<String> parentPathCodes,
             List<String> parentPathNames
     ) {
+        boolean originalUnlocked = Boolean.TRUE.equals(node.getUnlocked());
+
         List<String> pathNodeKeys = new ArrayList<>(parentPathNodeKeys);
         pathNodeKeys.add(node.getNodeKey());
         node.setPathNodeKeys(pathNodeKeys);
@@ -675,6 +699,8 @@ public class ActionTreeAppServiceImpl implements ActionTreeAppService {
             if (!NODE_ACTION.equals(node.getNodeType())) {
                 if (NODE_SUB_CATEGORY.equals(node.getNodeType()) && "OTHER".equals(node.getCode())) {
                     node.setUnlocked(true);
+                } else if (shouldKeepBehaviorUnlocked(node)) {
+                    node.setUnlocked(originalUnlocked);
                 } else {
                     node.setUnlocked(false);
                 }
@@ -696,7 +722,11 @@ public class ActionTreeAppServiceImpl implements ActionTreeAppService {
         node.setLeaf(false);
 
         if (!NODE_ACTION.equals(node.getNodeType())) {
-            node.setUnlocked(hasUnlockedChild);
+            if (shouldKeepBehaviorUnlocked(node)) {
+                node.setUnlocked(originalUnlocked || hasUnlockedChild);
+            } else {
+                node.setUnlocked(hasUnlockedChild);
+            }
         }
     }
 
@@ -802,6 +832,84 @@ public class ActionTreeAppServiceImpl implements ActionTreeAppService {
             meta.put("params", params);
         }
         return meta;
+    }
+
+    /**
+     * 从 meta 中提取 params map。
+     *
+     * @param meta meta
+     * @return params map
+     */
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> extractParamsMap(Map<String, Object> meta) {
+        if (meta == null) {
+            return new LinkedHashMap<>();
+        }
+        Object params = meta.get("params");
+        if (params instanceof Map) {
+            return (Map<String, Object>) params;
+        }
+        return new LinkedHashMap<>();
+    }
+
+    /**
+     * 从 map 中读取字符串。
+     *
+     * @param source 来源 map
+     * @param key    key
+     * @return 字符串
+     */
+    private String extractString(Map<String, Object> source, String key) {
+        if (source == null || !StringUtils.hasText(key)) {
+            return null;
+        }
+        Object value = source.get(key);
+        return value == null ? null : String.valueOf(value);
+    }
+
+    /**
+     * 从 map 中读取布尔值。
+     *
+     * @param source 来源 map
+     * @param key    key
+     * @return 布尔值
+     */
+    private boolean extractBoolean(Map<String, Object> source, String key) {
+        if (source == null || !StringUtils.hasText(key)) {
+            return false;
+        }
+        Object value = source.get(key);
+        if (value instanceof Boolean) {
+            return (Boolean) value;
+        }
+        if (value == null) {
+            return false;
+        }
+        return "true".equalsIgnoreCase(String.valueOf(value));
+    }
+
+    /**
+     * 判断行为节点是否需要保持可点击。
+     *
+     * @param node 行为节点
+     * @return 是否保持可点击
+     */
+    private boolean shouldKeepBehaviorUnlocked(ActionTreeResponseDTO.TreeNode node) {
+        if (node == null || !NODE_BEHAVIOR.equals(node.getNodeType())) {
+            return false;
+        }
+
+        Map<String, Object> meta = node.getMeta();
+        if (meta == null) {
+            return false;
+        }
+
+        if (extractBoolean(meta, "nav")) {
+            return true;
+        }
+
+        Object workspaceMode = meta.get("workspaceMode");
+        return workspaceMode != null && StringUtils.hasText(String.valueOf(workspaceMode));
     }
 
     /**
