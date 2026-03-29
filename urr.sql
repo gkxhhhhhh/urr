@@ -11,7 +11,7 @@
  Target Server Version : 80042 (8.0.42)
  File Encoding         : 65001
 
- Date: 29/03/2026 13:37:09
+ Date: 29/03/2026 15:28:02
 */
 
 SET NAMES utf8mb4;
@@ -1021,7 +1021,7 @@ CREATE TABLE `t_urr_player_activity`  (
   `action_code` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '动作编码，对应 t_urr_action_def.action_code',
   `task_type` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '任务业务类型 GATHER/BATTLE/CRAFT',
   `status` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '任务状态 QUEUED/RUNNING/COMPLETED/STOPPED/EXPIRED/FAILED',
-  `stop_reason` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '任务停止/结束原因 USER_STOP/USER_REPLACE/OFFLINE_TIMEOUT/FINISHED/ERROR',
+  `stop_reason` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '停止原因：USER_STOP/USER_REPLACE/OFFLINE_TIMEOUT/FINISHED/MATERIAL_SHORTAGE/ERROR',
   `category_id` bigint UNSIGNED NOT NULL DEFAULT 0 COMMENT '类型ID(可选)',
   `sub_category_id` bigint UNSIGNED NOT NULL DEFAULT 0 COMMENT '动作类型ID(可选)',
   `activity_type` tinyint UNSIGNED NOT NULL COMMENT '类型 1采集 2制造 3副本 4挂机战斗 5休息',
@@ -1113,6 +1113,32 @@ INSERT INTO `t_urr_player_activity` VALUES (56, 6, 1, 0, 0, 'GATHER_ARCANE_RESEA
 INSERT INTO `t_urr_player_activity` VALUES (57, 6, 1, 0, 0, 'GATHER_ARCANE_RESEARCH_OLD_FOREST_OUTSKIRTS', 'GATHER', 'COMPLETED', 'FINISHED', 0, 0, 1, NULL, 2, '2026-03-27 17:57:32', '2026-03-27 17:57:39', '2026-03-27 17:57:39', '2026-03-27 17:57:39', '2026-03-28 03:57:32', 3734450042008445837, NULL, 5, NULL, '-1', '2026-03-27 17:57:32', '-1', '2026-03-27 17:57:32', 0);
 INSERT INTO `t_urr_player_activity` VALUES (58, 6, 1, 0, 0, 'GATHER_ARCANE_RESEARCH_OLD_FOREST_OUTSKIRTS', 'GATHER', 'STOPPED', 'USER_STOP', 0, 0, 1, NULL, 3, '2026-03-29 10:33:11', '2026-03-29 12:54:39', '2026-03-29 12:54:39', '2026-03-29 12:54:39', '2026-03-29 20:33:11', 4312574093345144723, NULL, 101, NULL, '-1', '2026-03-29 10:33:10', '-1', '2026-03-29 10:33:10', 0);
 INSERT INTO `t_urr_player_activity` VALUES (59, 6, 1, 0, 0, 'GATHER_ARCANE_RESEARCH_MOON_SHADOW_RUINS', 'GATHER', 'STOPPED', 'USER_STOP', 0, 0, 1, NULL, 3, '2026-03-29 12:54:53', '2026-03-29 13:34:21', '2026-03-29 13:34:21', '2026-03-29 13:34:21', '2026-03-29 22:54:53', 2651737017022018148, NULL, 550, NULL, '-1', '2026-03-29 12:54:52', '-1', '2026-03-29 12:54:52', 0);
+
+-- ----------------------------
+-- Table structure for t_urr_player_craft_task
+-- ----------------------------
+DROP TABLE IF EXISTS `t_urr_player_craft_task`;
+CREATE TABLE `t_urr_player_craft_task`  (
+  `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键ID',
+  `task_id` bigint NOT NULL COMMENT '根任务ID，对应 t_urr_player_activity.id',
+  `player_id` bigint NOT NULL COMMENT '玩家ID',
+  `server_id` bigint NOT NULL DEFAULT 1 COMMENT '服务器ID',
+  `action_code` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '动作编码',
+  `target_count` bigint NOT NULL DEFAULT 0 COMMENT '目标次数，0表示无限',
+  `completed_count` bigint NOT NULL DEFAULT 0 COMMENT '已完成次数',
+  `recipe_snapshot_json` text CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL COMMENT '配方快照JSON',
+  `next_round_finish_time` bigint NULL DEFAULT NULL COMMENT '下一轮完成时间戳',
+  `status` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL DEFAULT 'RUNNING' COMMENT '状态 RUNNING/STOPPED/FINISHED',
+  `create_time` bigint NOT NULL COMMENT '创建时间',
+  `update_time` bigint NOT NULL COMMENT '更新时间',
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE INDEX `uk_task_id`(`task_id` ASC) USING BTREE,
+  INDEX `idx_player_status`(`player_id` ASC, `status` ASC) USING BTREE
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT = '玩家制造任务明细表' ROW_FORMAT = Dynamic;
+
+-- ----------------------------
+-- Records of t_urr_player_craft_task
+-- ----------------------------
 
 -- ----------------------------
 -- Table structure for t_urr_player_dungeon_progress
