@@ -73,7 +73,12 @@ public class CraftTaskSettleService {
     private final ObjectMapper objectMapper;
 
     /**
-     * 把制造任务推进并结算到指定时刻。
+     * 结算制造任务到指定时刻。
+     *
+     * 规则：
+     * 1. 开始时不预扣料。
+     * 2. 每轮结束时先刷新待入账，再判断材料，再扣料/发产物/发经验。
+     * 3. 当前轮成功后，立刻判断下一轮还能不能启动；如果不能，直接在当前轮结束时停掉，原因为 MATERIAL_SHORTAGE。
      *
      * @param taskId 根任务ID
      * @param settleTime 结算时刻
@@ -97,29 +102,33 @@ public class CraftTaskSettleService {
         if (craftTask == null) {
             return null;
         }
-
         if (!craftTask.isRunning()) {
             return craftTask;
         }
 
         while (craftTask.canSettleOneRound(settleTime)) {
-            LocalDateTime roundFinishTime = CraftTaskTimeSupport.fromEpochMilli(craftTask.getNextRoundFinishTime());
+            LocalDateTime roundFinishTime =
+                    CraftTaskTimeSupport.fromEpochMilli(craftTask.getNextRoundFinishTime());
+
             RecipeSnapshot snapshot = parseRecipeSnapshot(craftTask.getRecipeSnapshotJson());
 
-            /**
-             * 先把采集待入账刷新成正式库存，再校验当前轮是否可结算。
-             */
-            gatherTaskInventoryConsumePrepareService.prepareBeforeConsume(craftTask.getPlayerId(), roundFinishTime);
+            // 先把采集待入账刷新到正式库存，再做本轮制造消耗判断。
+            gatherTaskInventoryConsumePrepareService.prepareBeforeConsume(
+                    craftTask.getPlayerId(),
+                    roundFinishTime
+            );
 
             if (!hasEnoughCost(craftTask.getPlayerId(), snapshot.getCostMap())) {
                 stopByMaterialShortage(rootTask.getId(), roundFinishTime);
-                playerCraftTaskRepository.updateStatusByTaskId(rootTask.getId(), ActionTaskStatusEnum.STOPPED);
+                craftTask.setStatus(ActionTaskStatusEnum.STOPPED);
+                playerCraftTaskRepository.updateByTaskId(craftTask);
+                playerCraftTaskRepository.updateStatusByTaskId(
+                        rootTask.getId(),
+                        ActionTaskStatusEnum.STOPPED
+                );
                 return playerCraftTaskRepository.findByTaskId(taskId);
             }
 
-            /**
-             * 当前轮正式扣料、发产物、发经验。
-             */
             consumeCost(craftTask.getPlayerId(), snapshot.getCostMap());
             grantOutput(craftTask.getPlayerId(), craftTask.getServerId(), snapshot.getOutputMap());
 
@@ -134,41 +143,30 @@ public class CraftTaskSettleService {
             craftTask.setCompletedCount(craftTask.getSafeCompletedCount() + 1L);
             updateRootSettleTime(rootTask.getId(), roundFinishTime);
 
-            /**
-             * 达到目标次数，当前轮结束后正常完成。
-             */
             if (craftTask.isFinishedByTargetCount()) {
                 finishNormally(rootTask.getId(), roundFinishTime);
                 craftTask.setStatus(ActionTaskStatusEnum.COMPLETED);
                 playerCraftTaskRepository.updateByTaskId(craftTask);
-                playerCraftTaskRepository.updateStatusByTaskId(rootTask.getId(), ActionTaskStatusEnum.COMPLETED);
+                playerCraftTaskRepository.updateStatusByTaskId(
+                        rootTask.getId(),
+                        ActionTaskStatusEnum.COMPLETED
+                );
                 return playerCraftTaskRepository.findByTaskId(taskId);
             }
 
-            /**
-             * 关键修复：
-             * 当前轮成功后，立刻检查“下一轮是否还能启动”。
-             *
-             * 说明：
-             * 1. 这里不能直接把 nextRoundFinishTime 推到下一轮，否则玩家在任务创建后卖掉材料，
-             *    就会出现下一轮先空跑、到轮末才发现材料不足的问题。
-             * 2. 当前轮结束时刻 roundFinishTime，就是下一轮启动前的边界；
-             * 3. 在这个边界再次刷新一次待入账，并检查正式库存是否还能支撑下一轮；
-             * 4. 如果不能，立刻在当前轮结束时停成 MATERIAL_SHORTAGE，不再进入下一轮运行态。
-             */
-            gatherTaskInventoryConsumePrepareService.prepareBeforeConsume(craftTask.getPlayerId(), roundFinishTime);
-
-            if (!hasEnoughCost(craftTask.getPlayerId(), snapshot.getCostMap())) {
+            // 当前轮成功后，立刻判断下一轮是否还能启动。
+            // 不能让下一轮先空跑进度条，再在轮末因缺料失败。
+            if (!canStartNextRoundImmediately(craftTask.getPlayerId(), snapshot.getCostMap())) {
+                stopByMaterialShortage(rootTask.getId(), roundFinishTime);
                 craftTask.setStatus(ActionTaskStatusEnum.STOPPED);
                 playerCraftTaskRepository.updateByTaskId(craftTask);
-                stopByMaterialShortage(rootTask.getId(), roundFinishTime);
-                playerCraftTaskRepository.updateStatusByTaskId(rootTask.getId(), ActionTaskStatusEnum.STOPPED);
+                playerCraftTaskRepository.updateStatusByTaskId(
+                        rootTask.getId(),
+                        ActionTaskStatusEnum.STOPPED
+                );
                 return playerCraftTaskRepository.findByTaskId(taskId);
             }
 
-            /**
-             * 下一轮材料仍足够，才真正挂到下一轮运行态。
-             */
             LocalDateTime nextFinishTime =
                     roundFinishTime.plusNanos(snapshot.getCraftTimeMs().longValue() * 1_000_000L);
             craftTask.setNextRoundFinishTime(CraftTaskTimeSupport.toEpochMilli(nextFinishTime));
@@ -177,6 +175,25 @@ public class CraftTaskSettleService {
         }
 
         return playerCraftTaskRepository.findByTaskId(taskId);
+    }
+
+    /**
+     * 判断当前轮结算完成后，下一轮是否还能立刻启动。
+     *
+     * 说明：
+     * 1. 这里只判断正式库存是否还能覆盖下一轮消耗。
+     * 2. 不重复刷新 pending，因为本轮结算前已经刷新过一次，
+     *    且制造任务本身不会产生新的 pending_reward_pool。
+     *
+     * @param playerId 玩家ID
+     * @param costMap 下一轮消耗
+     * @return true-还能继续，false-材料不足
+     */
+    private boolean canStartNextRoundImmediately(Long playerId, Map<Long, Long> costMap) {
+        if (costMap == null || costMap.isEmpty()) {
+            return true;
+        }
+        return hasEnoughCost(playerId, costMap);
     }
 
     /**
