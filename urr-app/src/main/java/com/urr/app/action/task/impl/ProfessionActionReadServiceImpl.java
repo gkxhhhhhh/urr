@@ -3,18 +3,20 @@ package com.urr.app.action.task.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.urr.app.action.task.CraftTaskAppService;
 import com.urr.app.action.task.CraftTaskSettleService;
 import com.urr.app.action.task.GatherTaskReadService;
 import com.urr.app.action.task.PlayerActionQueueRepository;
 import com.urr.app.action.task.PlayerActionTaskRepository;
 import com.urr.app.action.task.PlayerCraftTaskRepository;
 import com.urr.app.action.task.ProfessionActionReadService;
+import com.urr.app.action.task.command.StartGatherTaskCommand;
 import com.urr.app.action.task.query.QueryGatherTaskPanelQuery;
 import com.urr.app.action.task.result.QueryGatherTaskPanelResult;
+import com.urr.app.action.task.result.StartGatherTaskResult;
 import com.urr.domain.action.ActionDefEntity;
 import com.urr.domain.action.task.ActionTaskConstants;
 import com.urr.domain.action.task.ActionTaskTypeEnum;
-import com.urr.domain.action.task.CraftTaskTimeSupport;
 import com.urr.domain.action.task.PlayerActionQueueEntity;
 import com.urr.domain.action.task.PlayerActionTask;
 import com.urr.domain.action.task.PlayerCraftTask;
@@ -30,6 +32,7 @@ import com.urr.infra.mapper.PlayerSkillMapper;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
@@ -72,6 +75,11 @@ public class ProfessionActionReadServiceImpl implements ProfessionActionReadServ
     private final CraftTaskSettleService craftTaskSettleService;
 
     /**
+     * 制造任务应用服务。
+     */
+    private final CraftTaskAppService craftTaskAppService;
+
+    /**
      * 采集读服务。
      */
     private final GatherTaskReadService gatherTaskReadService;
@@ -108,36 +116,94 @@ public class ProfessionActionReadServiceImpl implements ProfessionActionReadServ
      * @return 面板结果
      */
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public QueryGatherTaskPanelResult queryPanel(QueryGatherTaskPanelQuery query) {
         validateQuery(query);
         PlayerEntity player = requireOwnedPlayer(query.getAccountId(), query.getPlayerId());
         LocalDateTime readTime = query.getReadTime() == null ? LocalDateTime.now() : query.getReadTime();
-        PlayerActionTask runningTask = playerActionTaskRepository.findRunningByPlayerId(player.getId());
+
+        PlayerActionTask runningTask = loadLatestRunningTask(player.getId(), readTime);
+        if (runningTask == null) {
+            runningTask = tryAutoStartFirstCraftQueue(query.getAccountId(), player.getId());
+        }
+
         if (runningTask != null && ActionTaskTypeEnum.GATHER.equals(runningTask.getTaskType())) {
             return gatherTaskReadService.queryPanel(query);
         }
-        if (runningTask != null && ActionTaskTypeEnum.CRAFT.equals(runningTask.getTaskType())) {
-            craftTaskSettleService.settleTo(runningTask.getId(), readTime);
-            runningTask = playerActionTaskRepository.findRunningByPlayerId(player.getId());
-            if (runningTask != null && ActionTaskTypeEnum.GATHER.equals(runningTask.getTaskType())) {
-                return gatherTaskReadService.queryPanel(query);
-            }
-        }
+
         QueryGatherTaskPanelResult result = QueryGatherTaskPanelResult.createEmpty(player.getId(), readTime);
+
         if (runningTask != null && ActionTaskTypeEnum.CRAFT.equals(runningTask.getTaskType())) {
             PlayerCraftTask craftTask = playerCraftTaskRepository.findByTaskId(runningTask.getId());
-            result.setCurrentTask(buildRuntimeView(craftTask));
-            result.setHasRunningTask(craftTask != null && craftTask.isRunning());
+            if (craftTask != null && craftTask.isRunning()) {
+                result.setCurrentTask(buildRuntimeView(craftTask));
+                result.setHasRunningTask(Boolean.TRUE);
+            }
         }
-        List<PlayerActionQueueEntity> queueEntityList = playerActionQueueRepository.findQueuedByPlayerIdAndTaskType(
-                player.getId(),
-                ActionTaskTypeEnum.CRAFT
-        );
+
+        List<PlayerActionQueueEntity> queueEntityList =
+                playerActionQueueRepository.findQueuedByPlayerIdAndTaskType(player.getId(), ActionTaskTypeEnum.CRAFT);
         result.setQueueList(buildQueueViewList(queueEntityList));
         result.setQueueSize(queueEntityList == null ? 0 : queueEntityList.size());
         result.setPendingRewardPool(QueryGatherTaskPanelResult.PendingRewardPoolView.createEmpty());
         result.setDisplayInventory(buildInventoryView(player.getId()));
         return result;
+    }
+
+    /**
+     * 加载当前最新运行任务。
+     *
+     * @param playerId 角色ID
+     * @param readTime 读取时间
+     * @return 运行任务
+     */
+    private PlayerActionTask loadLatestRunningTask(Long playerId, LocalDateTime readTime) {
+        PlayerActionTask runningTask = playerActionTaskRepository.findRunningByPlayerId(playerId);
+        if (runningTask == null) {
+            return null;
+        }
+        if (ActionTaskTypeEnum.GATHER.equals(runningTask.getTaskType())) {
+            return runningTask;
+        }
+        if (!ActionTaskTypeEnum.CRAFT.equals(runningTask.getTaskType())) {
+            return runningTask;
+        }
+
+        craftTaskSettleService.settleTo(runningTask.getId(), readTime);
+        return playerActionTaskRepository.findRunningByPlayerId(playerId);
+    }
+
+    /**
+     * 在当前没有运行任务时，尝试自动拉起第一条制造队列。
+     *
+     * @param accountId 账号ID
+     * @param playerId 角色ID
+     * @return 最新运行任务
+     */
+    private PlayerActionTask tryAutoStartFirstCraftQueue(Long accountId, Long playerId) {
+        PlayerActionQueueEntity firstQueue =
+                playerActionQueueRepository.findFirstQueuedByPlayerIdAndTaskType(playerId, ActionTaskTypeEnum.CRAFT);
+        if (firstQueue == null) {
+            return null;
+        }
+
+        StartGatherTaskCommand startCommand = new StartGatherTaskCommand();
+        startCommand.setAccountId(accountId);
+        startCommand.setPlayerId(playerId);
+        startCommand.setActionCode(firstQueue.getActionCode());
+        startCommand.setTargetCount(firstQueue.getTargetCount());
+
+        StartGatherTaskResult startResult = craftTaskAppService.startNow(startCommand);
+        if (startResult == null || startResult.getTaskId() == null) {
+            return null;
+        }
+
+        int deleteRows = playerActionQueueRepository.deleteQueuedById(playerId, firstQueue.getId());
+        if (deleteRows != 1) {
+            throw new IllegalStateException("制造队列自动启动后删除队列失败，queueId=" + firstQueue.getId());
+        }
+
+        return playerActionTaskRepository.findRunningByPlayerId(playerId);
     }
 
     /**
@@ -161,7 +227,7 @@ public class ProfessionActionReadServiceImpl implements ProfessionActionReadServ
      * 校验玩家归属。
      *
      * @param accountId 账号ID
-     * @param playerId 玩家ID
+     * @param playerId 角色ID
      * @return 玩家
      */
     private PlayerEntity requireOwnedPlayer(Long accountId, Long playerId) {
@@ -188,7 +254,9 @@ public class ProfessionActionReadServiceImpl implements ProfessionActionReadServ
         if (craftTask == null) {
             return null;
         }
+
         CraftSnapshot snapshot = parseCraftSnapshot(craftTask.getRecipeSnapshotJson());
+
         QueryGatherTaskPanelResult.RuntimeView view = new QueryGatherTaskPanelResult.RuntimeView();
         view.setTaskId(craftTask.getId());
         view.setActionCode(craftTask.getActionCode());
@@ -198,19 +266,25 @@ public class ProfessionActionReadServiceImpl implements ProfessionActionReadServ
         view.setInfiniteTarget(craftTask.isInfiniteTarget());
         view.setCompletedCount(craftTask.getCompletedCount() == null ? 0L : craftTask.getCompletedCount());
         view.setFlushedCount(craftTask.getCompletedCount() == null ? 0L : craftTask.getCompletedCount());
-        view.setRemainingCount(craftTask.isInfiniteTarget() ? 0L : Math.max(craftTask.getTargetCount() - craftTask.getSafeCompletedCount(), 0L));
+        view.setRemainingCount(
+                craftTask.isInfiniteTarget()
+                        ? null
+                        : Math.max(craftTask.getTargetCount() - craftTask.getSafeCompletedCount(), 0L)
+        );
         view.setCurrentSegmentStart(craftTask.getSafeCompletedCount() + 1L);
         view.setCurrentSegmentEnd(craftTask.getSafeCompletedCount() + 1L);
         view.setSegmentSize(1);
         view.setStartTime(craftTask.getStartTime());
         view.setLastSettleTime(craftTask.getLastSettleTime());
         view.setOfflineExpireAt(craftTask.getOfflineExpireAt());
+
         QueryGatherTaskPanelResult.SnapshotView snapshotView = new QueryGatherTaskPanelResult.SnapshotView();
         snapshotView.setGatherLevel(resolveSkillLevel(craftTask.getPlayerId(), snapshot.getSkillId()));
         snapshotView.setGatherDurationMs(snapshot.getCraftTimeMs());
         snapshotView.setGatherEfficiency(null);
         snapshotView.setOfflineMinutesLimit(ActionTaskConstants.DEFAULT_OFFLINE_HOURS * 60);
         view.setSnapshot(snapshotView);
+
         QueryGatherTaskPanelResult.SegmentView segmentView = new QueryGatherTaskPanelResult.SegmentView();
         segmentView.setSegmentStart(craftTask.getSafeCompletedCount() + 1L);
         segmentView.setSegmentEnd(craftTask.getSafeCompletedCount() + 1L);
@@ -220,6 +294,7 @@ public class ProfessionActionReadServiceImpl implements ProfessionActionReadServ
         segmentView.setCompletedCountInSegment(0L);
         segmentView.setRemainingCountInSegment(1L);
         view.setCurrentSegment(segmentView);
+
         view.setPendingRewardPool(QueryGatherTaskPanelResult.PendingRewardPoolView.createEmpty());
         return view;
     }
@@ -230,16 +305,20 @@ public class ProfessionActionReadServiceImpl implements ProfessionActionReadServ
      * @param queueEntityList 队列实体列表
      * @return 队列视图
      */
-    private List<QueryGatherTaskPanelResult.QueueItemView> buildQueueViewList(List<PlayerActionQueueEntity> queueEntityList) {
-        List<QueryGatherTaskPanelResult.QueueItemView> result = new ArrayList<QueryGatherTaskPanelResult.QueueItemView>();
+    private List<QueryGatherTaskPanelResult.QueueItemView> buildQueueViewList(
+            List<PlayerActionQueueEntity> queueEntityList
+    ) {
+        List<QueryGatherTaskPanelResult.QueueItemView> result = new ArrayList<>();
         if (queueEntityList == null || queueEntityList.isEmpty()) {
             return result;
         }
+
         for (int i = 0; i < queueEntityList.size(); i++) {
             PlayerActionQueueEntity queueEntity = queueEntityList.get(i);
             if (queueEntity == null) {
                 continue;
             }
+
             QueryGatherTaskPanelResult.QueueItemView view = new QueryGatherTaskPanelResult.QueueItemView();
             view.setQueueId(queueEntity.getId());
             view.setTaskId(null);
@@ -248,7 +327,10 @@ public class ProfessionActionReadServiceImpl implements ProfessionActionReadServ
             view.setStatus(queueEntity.getStatus());
             view.setQueuePosition(i + 1);
             view.setTargetCount(queueEntity.getTargetCount() == null ? 0L : queueEntity.getTargetCount());
-            view.setInfiniteTarget(queueEntity.getTargetCount() != null && queueEntity.getTargetCount().longValue() == -1L);
+            view.setInfiniteTarget(
+                    queueEntity.getTargetCount() != null
+                            && queueEntity.getTargetCount().longValue() == ActionTaskConstants.INFINITE_TARGET_COUNT
+            );
             result.add(view);
         }
         return result;
@@ -268,18 +350,23 @@ public class ProfessionActionReadServiceImpl implements ProfessionActionReadServ
                         .orderByDesc(PlayerItemStackEntity::getQty)
                         .orderByAsc(PlayerItemStackEntity::getId)
         );
+
         QueryGatherTaskPanelResult.InventoryView view = QueryGatherTaskPanelResult.InventoryView.createEmpty();
         if (stackList == null || stackList.isEmpty()) {
             return view;
         }
-        List<QueryGatherTaskPanelResult.InventoryEntryView> entryList = new ArrayList<QueryGatherTaskPanelResult.InventoryEntryView>();
+
+        List<QueryGatherTaskPanelResult.InventoryEntryView> entryList = new ArrayList<>();
         for (int i = 0; i < stackList.size(); i++) {
             PlayerItemStackEntity stack = stackList.get(i);
             if (stack == null || stack.getQty() == null || stack.getQty().longValue() <= 0L) {
                 continue;
             }
+
             ItemDefEntity itemDef = itemDefMapper.selectById(stack.getItemId());
-            QueryGatherTaskPanelResult.InventoryEntryView entryView = new QueryGatherTaskPanelResult.InventoryEntryView();
+
+            QueryGatherTaskPanelResult.InventoryEntryView entryView =
+                    new QueryGatherTaskPanelResult.InventoryEntryView();
             entryView.setRewardType("ITEM");
             entryView.setRewardCode(itemDef == null ? String.valueOf(stack.getItemId()) : itemDef.getItemCode());
             entryView.setRewardName(itemDef == null ? String.valueOf(stack.getItemId()) : itemDef.getNameZh());
@@ -288,6 +375,7 @@ public class ProfessionActionReadServiceImpl implements ProfessionActionReadServ
             entryView.setDisplayQuantity(stack.getQty());
             entryList.add(entryView);
         }
+
         view.setEntryList(entryList);
         view.setEntryCount(entryList.size());
         return view;
@@ -303,6 +391,7 @@ public class ProfessionActionReadServiceImpl implements ProfessionActionReadServ
         if (!StringUtils.hasText(actionCode)) {
             return actionCode;
         }
+
         ActionDefEntity actionDef = actionDefMapper.selectOne(
                 new LambdaQueryWrapper<ActionDefEntity>()
                         .eq(ActionDefEntity::getActionCode, actionCode.trim())
@@ -323,6 +412,7 @@ public class ProfessionActionReadServiceImpl implements ProfessionActionReadServ
         if (playerId == null || skillId == null) {
             return 1;
         }
+
         PlayerSkillEntity playerSkill = playerSkillMapper.selectOne(
                 new LambdaQueryWrapper<PlayerSkillEntity>()
                         .eq(PlayerSkillEntity::getPlayerId, playerId)
@@ -330,7 +420,7 @@ public class ProfessionActionReadServiceImpl implements ProfessionActionReadServ
                         .eq(PlayerSkillEntity::getDeleteFlag, 0)
                         .last("limit 1")
         );
-        if (playerSkill == null || playerSkill.getSkillLevel() == null || playerSkill.getSkillLevel().intValue() <= 0) {
+        if (playerSkill == null || playerSkill.getSkillLevel() == null || playerSkill.getSkillLevel() <= 0) {
             return 1;
         }
         return playerSkill.getSkillLevel();
@@ -348,6 +438,7 @@ public class ProfessionActionReadServiceImpl implements ProfessionActionReadServ
             snapshot.setCraftTimeMs(0);
             return snapshot;
         }
+
         try {
             JsonNode root = objectMapper.readTree(snapshotJson);
             snapshot.setSkillId(readLong(root, "skillId", null));
@@ -399,10 +490,11 @@ public class ProfessionActionReadServiceImpl implements ProfessionActionReadServ
      * @return map
      */
     private Map<Long, Long> readLongMap(JsonNode node) {
-        Map<Long, Long> result = new LinkedHashMap<Long, Long>();
+        Map<Long, Long> result = new LinkedHashMap<>();
         if (node == null || node.isNull() || !node.isObject()) {
             return result;
         }
+
         Iterator<Map.Entry<String, JsonNode>> iterator = node.fields();
         while (iterator.hasNext()) {
             Map.Entry<String, JsonNode> entry = iterator.next();

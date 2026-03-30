@@ -87,28 +87,42 @@ public class CraftTaskSettleService {
         if (settleTime == null) {
             throw new IllegalArgumentException("settleTime不能为空");
         }
+
         PlayerActionTask rootTask = playerActionTaskRepository.findById(taskId);
         if (rootTask == null) {
             return null;
         }
+
         PlayerCraftTask craftTask = playerCraftTaskRepository.findByTaskId(taskId);
         if (craftTask == null) {
             return null;
         }
+
         if (!craftTask.isRunning()) {
             return craftTask;
         }
+
         while (craftTask.canSettleOneRound(settleTime)) {
             LocalDateTime roundFinishTime = CraftTaskTimeSupport.fromEpochMilli(craftTask.getNextRoundFinishTime());
             RecipeSnapshot snapshot = parseRecipeSnapshot(craftTask.getRecipeSnapshotJson());
+
+            /**
+             * 先把采集待入账刷新成正式库存，再校验当前轮是否可结算。
+             */
             gatherTaskInventoryConsumePrepareService.prepareBeforeConsume(craftTask.getPlayerId(), roundFinishTime);
+
             if (!hasEnoughCost(craftTask.getPlayerId(), snapshot.getCostMap())) {
                 stopByMaterialShortage(rootTask.getId(), roundFinishTime);
                 playerCraftTaskRepository.updateStatusByTaskId(rootTask.getId(), ActionTaskStatusEnum.STOPPED);
                 return playerCraftTaskRepository.findByTaskId(taskId);
             }
+
+            /**
+             * 当前轮正式扣料、发产物、发经验。
+             */
             consumeCost(craftTask.getPlayerId(), snapshot.getCostMap());
             grantOutput(craftTask.getPlayerId(), craftTask.getServerId(), snapshot.getOutputMap());
+
             if (snapshot.getExpGain() != null && snapshot.getExpGain().longValue() > 0L) {
                 professionSkillExpService.applySkillExp(
                         craftTask.getPlayerId(),
@@ -116,8 +130,13 @@ public class CraftTaskSettleService {
                         snapshot.getExpGain()
                 );
             }
+
             craftTask.setCompletedCount(craftTask.getSafeCompletedCount() + 1L);
             updateRootSettleTime(rootTask.getId(), roundFinishTime);
+
+            /**
+             * 达到目标次数，当前轮结束后正常完成。
+             */
             if (craftTask.isFinishedByTargetCount()) {
                 finishNormally(rootTask.getId(), roundFinishTime);
                 craftTask.setStatus(ActionTaskStatusEnum.COMPLETED);
@@ -125,11 +144,38 @@ public class CraftTaskSettleService {
                 playerCraftTaskRepository.updateStatusByTaskId(rootTask.getId(), ActionTaskStatusEnum.COMPLETED);
                 return playerCraftTaskRepository.findByTaskId(taskId);
             }
-            LocalDateTime nextFinishTime = roundFinishTime.plusNanos(snapshot.getCraftTimeMs().longValue() * 1_000_000L);
+
+            /**
+             * 关键修复：
+             * 当前轮成功后，立刻检查“下一轮是否还能启动”。
+             *
+             * 说明：
+             * 1. 这里不能直接把 nextRoundFinishTime 推到下一轮，否则玩家在任务创建后卖掉材料，
+             *    就会出现下一轮先空跑、到轮末才发现材料不足的问题。
+             * 2. 当前轮结束时刻 roundFinishTime，就是下一轮启动前的边界；
+             * 3. 在这个边界再次刷新一次待入账，并检查正式库存是否还能支撑下一轮；
+             * 4. 如果不能，立刻在当前轮结束时停成 MATERIAL_SHORTAGE，不再进入下一轮运行态。
+             */
+            gatherTaskInventoryConsumePrepareService.prepareBeforeConsume(craftTask.getPlayerId(), roundFinishTime);
+
+            if (!hasEnoughCost(craftTask.getPlayerId(), snapshot.getCostMap())) {
+                craftTask.setStatus(ActionTaskStatusEnum.STOPPED);
+                playerCraftTaskRepository.updateByTaskId(craftTask);
+                stopByMaterialShortage(rootTask.getId(), roundFinishTime);
+                playerCraftTaskRepository.updateStatusByTaskId(rootTask.getId(), ActionTaskStatusEnum.STOPPED);
+                return playerCraftTaskRepository.findByTaskId(taskId);
+            }
+
+            /**
+             * 下一轮材料仍足够，才真正挂到下一轮运行态。
+             */
+            LocalDateTime nextFinishTime =
+                    roundFinishTime.plusNanos(snapshot.getCraftTimeMs().longValue() * 1_000_000L);
             craftTask.setNextRoundFinishTime(CraftTaskTimeSupport.toEpochMilli(nextFinishTime));
             craftTask.setStatus(ActionTaskStatusEnum.RUNNING);
             playerCraftTaskRepository.updateByTaskId(craftTask);
         }
+
         return playerCraftTaskRepository.findByTaskId(taskId);
     }
 
@@ -143,6 +189,7 @@ public class CraftTaskSettleService {
         if (recipeSnapshotJson == null || recipeSnapshotJson.trim().isEmpty()) {
             throw new IllegalStateException("制造任务缺少配方快照");
         }
+
         try {
             JsonNode root = objectMapper.readTree(recipeSnapshotJson);
             RecipeSnapshot snapshot = new RecipeSnapshot();
@@ -212,21 +259,24 @@ public class CraftTaskSettleService {
      * @return map
      */
     private Map<Long, Long> readLongMap(JsonNode node) {
-        Map<Long, Long> result = new LinkedHashMap<Long, Long>();
+        Map<Long, Long> result = new LinkedHashMap<>();
         if (node == null || node.isNull() || !node.isObject()) {
             return result;
         }
+
         Iterator<Map.Entry<String, JsonNode>> iterator = node.fields();
         while (iterator.hasNext()) {
             Map.Entry<String, JsonNode> entry = iterator.next();
             if (entry == null || entry.getKey() == null || entry.getValue() == null) {
                 continue;
             }
+
             long itemId = Long.parseLong(entry.getKey());
             long quantity = entry.getValue().asLong(0L);
             if (quantity <= 0L) {
                 continue;
             }
+
             result.put(itemId, quantity);
         }
         return result;
@@ -243,6 +293,7 @@ public class CraftTaskSettleService {
         if (costMap == null || costMap.isEmpty()) {
             return true;
         }
+
         for (Map.Entry<Long, Long> entry : costMap.entrySet()) {
             Long ownedQuantity = sumFormalQuantity(playerId, entry.getKey());
             if (ownedQuantity.longValue() < entry.getValue().longValue()) {
@@ -262,6 +313,7 @@ public class CraftTaskSettleService {
         if (costMap == null || costMap.isEmpty()) {
             return;
         }
+
         for (Map.Entry<Long, Long> entry : costMap.entrySet()) {
             deductOneItem(playerId, entry.getKey(), entry.getValue());
         }
@@ -278,6 +330,7 @@ public class CraftTaskSettleService {
         if (outputMap == null || outputMap.isEmpty()) {
             return;
         }
+
         for (Map.Entry<Long, Long> entry : outputMap.entrySet()) {
             addOneItem(playerId, serverId, entry.getKey(), entry.getValue());
         }
@@ -298,10 +351,12 @@ public class CraftTaskSettleService {
                         .eq(PlayerItemStackEntity::getDeleteFlag, 0)
                         .orderByAsc(PlayerItemStackEntity::getId)
         );
+
         long total = 0L;
         if (stackList == null || stackList.isEmpty()) {
             return total;
         }
+
         for (int i = 0; i < stackList.size(); i++) {
             PlayerItemStackEntity stack = stackList.get(i);
             if (stack == null || stack.getQty() == null || stack.getQty().longValue() <= 0L) {
@@ -324,6 +379,7 @@ public class CraftTaskSettleService {
         if (remain <= 0L) {
             return;
         }
+
         List<PlayerItemStackEntity> stackList = playerItemStackMapper.selectList(
                 new LambdaQueryWrapper<PlayerItemStackEntity>()
                         .eq(PlayerItemStackEntity::getPlayerId, playerId)
@@ -331,26 +387,31 @@ public class CraftTaskSettleService {
                         .eq(PlayerItemStackEntity::getDeleteFlag, 0)
                         .orderByAsc(PlayerItemStackEntity::getId)
         );
+
         if (stackList == null || stackList.isEmpty()) {
             throw new IllegalStateException("材料不足，itemId=" + itemId);
         }
+
         for (int i = 0; i < stackList.size(); i++) {
             PlayerItemStackEntity stack = stackList.get(i);
             long currentQty = stack.getQty() == null ? 0L : stack.getQty().longValue();
             if (currentQty <= 0L) {
                 continue;
             }
+
             if (currentQty >= remain) {
                 stack.setQty(currentQty - remain);
                 stack.setUpdateUser("-1");
                 playerItemStackMapper.updateById(stack);
                 return;
             }
+
             stack.setQty(0L);
             stack.setUpdateUser("-1");
             playerItemStackMapper.updateById(stack);
             remain -= currentQty;
         }
+
         if (remain > 0L) {
             throw new IllegalStateException("材料不足，itemId=" + itemId);
         }
@@ -368,6 +429,7 @@ public class CraftTaskSettleService {
         if (quantity == null || quantity.longValue() <= 0L) {
             return;
         }
+
         PlayerItemStackEntity stack = playerItemStackMapper.selectOne(
                 new LambdaQueryWrapper<PlayerItemStackEntity>()
                         .eq(PlayerItemStackEntity::getPlayerId, playerId)
@@ -376,10 +438,12 @@ public class CraftTaskSettleService {
                         .orderByAsc(PlayerItemStackEntity::getId)
                         .last("limit 1")
         );
+
         if (stack == null) {
             insertNewStack(playerId, serverId, itemId, quantity);
             return;
         }
+
         long currentQty = stack.getQty() == null ? 0L : stack.getQty().longValue();
         stack.setQty(currentQty + quantity.longValue());
         stack.setUpdateUser("-1");
@@ -402,6 +466,7 @@ public class CraftTaskSettleService {
         if (itemDef == null) {
             throw new IllegalStateException("物品定义不存在，itemId=" + itemId);
         }
+
         PlayerItemStackEntity stack = new PlayerItemStackEntity();
         stack.setPlayerId(playerId);
         stack.setServerId(serverId == null ? 1 : serverId);
@@ -411,6 +476,7 @@ public class CraftTaskSettleService {
         stack.setRemarks("craft_reward");
         stack.setCreateUser("-1");
         stack.setUpdateUser("-1");
+
         int rows = playerItemStackMapper.insert(stack);
         if (rows != 1) {
             throw new IllegalStateException("新增制造产物失败，itemId=" + itemId);
@@ -428,6 +494,7 @@ public class CraftTaskSettleService {
         if (entity == null) {
             return;
         }
+
         entity.setStatus(ActionTaskStatusEnum.STOPPED.getCode());
         entity.setStopReason(ActionTaskStopReasonEnum.MATERIAL_SHORTAGE.getCode());
         entity.setState(3);
@@ -448,6 +515,7 @@ public class CraftTaskSettleService {
         if (entity == null) {
             return;
         }
+
         entity.setStatus(ActionTaskStatusEnum.COMPLETED.getCode());
         entity.setStopReason(ActionTaskStopReasonEnum.FINISHED.getCode());
         entity.setState(3);
@@ -468,6 +536,7 @@ public class CraftTaskSettleService {
         if (entity == null) {
             return;
         }
+
         entity.setLastSettleTime(settleTime);
         entity.setLastCalcTime(settleTime);
         entity.setUpdateUser("-1");
