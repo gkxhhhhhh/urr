@@ -31,6 +31,11 @@ public enum ActionTaskStopReasonEnum {
     FINISHED("FINISHED", "正常完成"),
 
     /**
+     * 制造材料不足。
+     */
+    MATERIAL_SHORTAGE("MATERIAL_SHORTAGE", "材料不足"),
+
+    /**
      * 运行异常。
      */
     ERROR("ERROR", "运行异常");

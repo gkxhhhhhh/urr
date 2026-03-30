@@ -1,28 +1,29 @@
 package com.urr.api.game;
 
 import com.urr.api.auth.AuthRequired;
+import com.urr.api.game.dto.GatherTaskPanelResponse;
 import com.urr.api.game.dto.ProfessionActionCommandRequest;
 import com.urr.api.game.dto.ProfessionActionCommandResponse;
 import com.urr.api.game.dto.ProfessionActionCommandType;
 import com.urr.app.action.task.ProfessionActionCommandAppService;
+import com.urr.app.action.task.ProfessionActionReadService;
+import com.urr.app.action.task.query.QueryGatherTaskPanelQuery;
 import com.urr.app.action.task.result.ProfessionActionCommandResult;
+import com.urr.app.action.task.result.QueryGatherTaskPanelResult;
 import com.urr.commons.api.ResponseData;
 import lombok.RequiredArgsConstructor;
 import org.springframework.validation.annotation.Validated;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import javax.validation.Valid;
 
 /**
  * 职业动作命令 Controller。
- *
- * 说明：
- * 1. 统一收口职业动作命令写入口。
- * 2. 当前内部仍只复用已落地的 gather task 能力。
- * 3. 不在这里扩散到市场、战斗、首页初始化快照。
  */
 @RestController
 @RequestMapping("/api/game/profession-actions")
@@ -36,12 +37,17 @@ public class ProfessionActionCommandController {
     private final ProfessionActionCommandAppService professionActionCommandAppService;
 
     /**
-     * 职业动作命令组装器。
+     * 通用职业动作读服务。
+     */
+    private final ProfessionActionReadService professionActionReadService;
+
+    /**
+     * 组装器。
      */
     private final ProfessionActionCommandControllerAssembler professionActionCommandControllerAssembler;
 
     /**
-     * 采集接口异常翻译器。
+     * 异常翻译器。
      */
     private final GatherTaskApiExceptionTranslator gatherTaskApiExceptionTranslator;
 
@@ -52,15 +58,33 @@ public class ProfessionActionCommandController {
      * @return 命令响应
      */
     @PostMapping("/command")
-    public ResponseData<ProfessionActionCommandResponse> execute(@RequestBody @Valid ProfessionActionCommandRequest request) {
+    public ResponseData execute(@RequestBody @Valid ProfessionActionCommandRequest request) {
         Long accountId = AuthRequired.requireAccountId();
         ProfessionActionCommandType commandType = parseCommandType(request.getCommandType());
-
         try {
             ProfessionActionCommandResult result = professionActionCommandAppService.execute(
                     professionActionCommandControllerAssembler.toCommand(accountId, request, commandType)
             );
             ProfessionActionCommandResponse response = professionActionCommandControllerAssembler.toResponse(result);
+            return ResponseData.success(response);
+        } catch (RuntimeException exception) {
+            throw gatherTaskApiExceptionTranslator.translate(exception);
+        }
+    }
+
+    /**
+     * 查询职业动作面板。
+     *
+     * @param playerId 角色ID
+     * @return 面板响应
+     */
+    @GetMapping("/panel")
+    public ResponseData queryPanel(@RequestParam("playerId") Long playerId) {
+        Long accountId = AuthRequired.requireAccountId();
+        try {
+            QueryGatherTaskPanelQuery query = professionActionCommandControllerAssembler.toPanelQuery(accountId, playerId);
+            QueryGatherTaskPanelResult result = professionActionReadService.queryPanel(query);
+            GatherTaskPanelResponse response = professionActionCommandControllerAssembler.toPanelResponse(result);
             return ResponseData.success(response);
         } catch (RuntimeException exception) {
             throw gatherTaskApiExceptionTranslator.translate(exception);

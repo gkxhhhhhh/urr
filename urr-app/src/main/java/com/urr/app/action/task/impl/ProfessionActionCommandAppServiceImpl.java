@@ -1,8 +1,10 @@
 package com.urr.app.action.task.impl;
 
+import com.urr.app.action.task.CraftTaskAppService;
 import com.urr.app.action.task.GatherTaskAppService;
-import com.urr.app.action.task.GatherTaskReadService;
+import com.urr.app.action.task.PlayerActionTaskRepository;
 import com.urr.app.action.task.ProfessionActionCommandAppService;
+import com.urr.app.action.task.ProfessionActionReadService;
 import com.urr.app.action.task.command.EnqueueGatherTaskCommand;
 import com.urr.app.action.task.command.ProfessionActionCommand;
 import com.urr.app.action.task.command.StartGatherTaskCommand;
@@ -12,6 +14,8 @@ import com.urr.app.action.task.result.ProfessionActionCommandResult;
 import com.urr.app.action.task.result.QueryGatherTaskPanelResult;
 import com.urr.app.action.task.result.StartGatherTaskResult;
 import com.urr.app.action.task.result.StopGatherTaskResult;
+import com.urr.domain.action.task.ActionTaskTypeEnum;
+import com.urr.domain.action.task.PlayerActionTask;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -19,12 +23,6 @@ import org.springframework.util.StringUtils;
 
 /**
  * 职业动作命令应用服务实现。
- *
- * 说明：
- * 1. 当前只做“命令收口”，不做通用引擎重构。
- * 2. START_NOW / ENQUEUE / STOP 继续复用现有 gather task 服务。
- * 3. REFRESH 只负责读取最新面板。
- * 4. 每次命令成功后，都返回 latestPanel，供前端直接联动。
  */
 @Service
 @RequiredArgsConstructor
@@ -56,9 +54,19 @@ public class ProfessionActionCommandAppServiceImpl implements ProfessionActionCo
     private final GatherTaskAppService gatherTaskAppService;
 
     /**
-     * 采集任务读服务。
+     * 制造任务应用服务。
      */
-    private final GatherTaskReadService gatherTaskReadService;
+    private final CraftTaskAppService craftTaskAppService;
+
+    /**
+     * 动作根任务仓储。
+     */
+    private final PlayerActionTaskRepository playerActionTaskRepository;
+
+    /**
+     * 通用职业动作读服务。
+     */
+    private final ProfessionActionReadService professionActionReadService;
 
     /**
      * 执行职业动作命令。
@@ -70,47 +78,93 @@ public class ProfessionActionCommandAppServiceImpl implements ProfessionActionCo
     @Transactional(rollbackFor = Exception.class)
     public ProfessionActionCommandResult execute(ProfessionActionCommand command) {
         validateBaseCommand(command);
-
         String normalizedCommandType = normalizeCommandType(command.getCommandType());
         command.setCommandType(normalizedCommandType);
         normalizeActionCode(command);
         validateTypeSpecificFields(command);
-
         ProfessionActionCommandResult result = new ProfessionActionCommandResult();
         result.setCommandType(normalizedCommandType);
         result.setSuccess(Boolean.TRUE);
         result.setPlayerId(command.getPlayerId());
         result.setActionCode(command.getActionCode());
         result.setTargetCount(command.getTargetCount());
-
         if (COMMAND_START_NOW.equals(normalizedCommandType)) {
-            StartGatherTaskResult operateResult = gatherTaskAppService.startNow(toStartCommand(command));
+            StartGatherTaskResult operateResult = executeStartNow(command);
             result.setOperateResult(operateResult);
             result.setMessage("职业动作已开始");
             if (operateResult != null) {
                 result.setActionCode(operateResult.getActionCode());
             }
         } else if (COMMAND_ENQUEUE.equals(normalizedCommandType)) {
-            StartGatherTaskResult operateResult = gatherTaskAppService.enqueue(toEnqueueCommand(command));
+            StartGatherTaskResult operateResult = executeEnqueue(command);
             result.setOperateResult(operateResult);
             result.setMessage("职业动作已加入队列");
             if (operateResult != null) {
                 result.setActionCode(operateResult.getActionCode());
             }
         } else if (COMMAND_STOP.equals(normalizedCommandType)) {
-            StopGatherTaskResult stopResult = gatherTaskAppService.stopCurrent(toStopCommand(command));
+            StopGatherTaskResult stopResult = executeStop(command);
             result.setStopResult(stopResult);
             result.setMessage("当前职业动作已停止");
         } else {
             result.setMessage("职业动作状态已刷新");
         }
-
         result.setLatestPanel(loadLatestPanel(command));
         return result;
     }
 
     /**
-     * 校验命令的基础字段。
+     * 执行开始命令。
+     *
+     * @param command 命令
+     * @return 结果
+     */
+    private StartGatherTaskResult executeStartNow(ProfessionActionCommand command) {
+        if (isCraftAction(command.getActionCode())) {
+            return craftTaskAppService.startNow(toStartCommand(command));
+        }
+        return gatherTaskAppService.startNow(toStartCommand(command));
+    }
+
+    /**
+     * 执行入队命令。
+     *
+     * @param command 命令
+     * @return 结果
+     */
+    private StartGatherTaskResult executeEnqueue(ProfessionActionCommand command) {
+        if (isCraftAction(command.getActionCode())) {
+            return craftTaskAppService.enqueue(toEnqueueCommand(command));
+        }
+        return gatherTaskAppService.enqueue(toEnqueueCommand(command));
+    }
+
+    /**
+     * 执行停止命令。
+     *
+     * @param command 命令
+     * @return 结果
+     */
+    private StopGatherTaskResult executeStop(ProfessionActionCommand command) {
+        PlayerActionTask runningTask = playerActionTaskRepository.findRunningByPlayerId(command.getPlayerId());
+        if (runningTask != null && ActionTaskTypeEnum.CRAFT.equals(runningTask.getTaskType())) {
+            return craftTaskAppService.stopCurrent(toStopCommand(command));
+        }
+        return gatherTaskAppService.stopCurrent(toStopCommand(command));
+    }
+
+    /**
+     * 判断是否制造动作。
+     *
+     * @param actionCode 动作编码
+     * @return true-制造，false-非制造
+     */
+    private boolean isCraftAction(String actionCode) {
+        return StringUtils.hasText(actionCode) && actionCode.trim().toUpperCase().startsWith("CRAFT_");
+    }
+
+    /**
+     * 校验命令基础字段。
      *
      * @param command 职业动作命令
      */
@@ -133,13 +187,12 @@ public class ProfessionActionCommandAppServiceImpl implements ProfessionActionCo
      * 规范化命令类型。
      *
      * @param commandType 原始命令类型
-     * @return 规范化后的命令类型
+     * @return 规范化结果
      */
     private String normalizeCommandType(String commandType) {
         if (!StringUtils.hasText(commandType)) {
             throw new IllegalArgumentException("commandType不能为空");
         }
-
         String normalized = commandType.trim();
         if (COMMAND_START_NOW.equalsIgnoreCase(normalized)) {
             return COMMAND_START_NOW;
@@ -153,14 +206,13 @@ public class ProfessionActionCommandAppServiceImpl implements ProfessionActionCo
         if (COMMAND_REFRESH.equalsIgnoreCase(normalized)) {
             return COMMAND_REFRESH;
         }
-
         throw new IllegalArgumentException("commandType 只能是 START_NOW / ENQUEUE / STOP / REFRESH");
     }
 
     /**
      * 规范化动作编码。
      *
-     * @param command 职业动作命令
+     * @param command 命令
      */
     private void normalizeActionCode(ProfessionActionCommand command) {
         if (command == null) {
@@ -173,26 +225,24 @@ public class ProfessionActionCommandAppServiceImpl implements ProfessionActionCo
     }
 
     /**
-     * 校验命令的类型相关字段。
+     * 校验类型相关字段。
      *
-     * @param command 职业动作命令
+     * @param command 命令
      */
     private void validateTypeSpecificFields(ProfessionActionCommand command) {
         if (command == null) {
             return;
         }
-
         if (needActionCode(command.getCommandType()) && !StringUtils.hasText(command.getActionCode())) {
             throw new IllegalArgumentException("actionCode不能为空");
         }
-
         if (needTargetCount(command.getCommandType())) {
             validateTargetCount(command.getTargetCount());
         }
     }
 
     /**
-     * 判断当前命令是否需要 actionCode。
+     * 判断是否需要 actionCode。
      *
      * @param commandType 命令类型
      * @return true-需要，false-不需要
@@ -202,7 +252,7 @@ public class ProfessionActionCommandAppServiceImpl implements ProfessionActionCo
     }
 
     /**
-     * 判断当前命令是否需要 targetCount。
+     * 判断是否需要 targetCount。
      *
      * @param commandType 命令类型
      * @return true-需要，false-不需要
@@ -229,10 +279,10 @@ public class ProfessionActionCommandAppServiceImpl implements ProfessionActionCo
     }
 
     /**
-     * 转换成“立即开始”命令。
+     * 转换成开始命令。
      *
      * @param command 职业动作命令
-     * @return 开始采集命令
+     * @return 开始命令
      */
     private StartGatherTaskCommand toStartCommand(ProfessionActionCommand command) {
         StartGatherTaskCommand startCommand = new StartGatherTaskCommand();
@@ -244,7 +294,7 @@ public class ProfessionActionCommandAppServiceImpl implements ProfessionActionCo
     }
 
     /**
-     * 转换成“加入队列”命令。
+     * 转换成入队命令。
      *
      * @param command 职业动作命令
      * @return 入队命令
@@ -259,7 +309,7 @@ public class ProfessionActionCommandAppServiceImpl implements ProfessionActionCo
     }
 
     /**
-     * 转换成“停止当前任务”命令。
+     * 转换成停止命令。
      *
      * @param command 职业动作命令
      * @return 停止命令
@@ -272,16 +322,16 @@ public class ProfessionActionCommandAppServiceImpl implements ProfessionActionCo
     }
 
     /**
-     * 读取命令执行后的最新面板。
+     * 读取最新面板。
      *
      * @param command 职业动作命令
-     * @return 最新面板
+     * @return 面板结果
      */
     private QueryGatherTaskPanelResult loadLatestPanel(ProfessionActionCommand command) {
         QueryGatherTaskPanelQuery query = new QueryGatherTaskPanelQuery();
         query.setAccountId(command.getAccountId());
         query.setPlayerId(command.getPlayerId());
         query.setReadTime(null);
-        return gatherTaskReadService.queryPanel(query);
+        return professionActionReadService.queryPanel(query);
     }
 }
