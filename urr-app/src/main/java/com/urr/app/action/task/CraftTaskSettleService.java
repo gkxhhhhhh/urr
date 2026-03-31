@@ -11,9 +11,15 @@ import com.urr.domain.action.task.PlayerActionTaskEntity;
 import com.urr.domain.action.task.PlayerCraftTask;
 import com.urr.domain.item.ItemDefEntity;
 import com.urr.domain.item.PlayerItemStackEntity;
+import com.urr.domain.skill.PlayerSkillEntity;
+import com.urr.domain.wallet.WalletEntity;
+import com.urr.domain.wallet.WalletFlowEntity;
 import com.urr.infra.mapper.ItemDefMapper;
 import com.urr.infra.mapper.PlayerActionTaskMapper;
 import com.urr.infra.mapper.PlayerItemStackMapper;
+import com.urr.infra.mapper.PlayerSkillMapper;
+import com.urr.infra.mapper.WalletFlowMapper;
+import com.urr.infra.mapper.WalletMapper;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -56,6 +62,21 @@ public class CraftTaskSettleService {
      * 物品定义 Mapper。
      */
     private final ItemDefMapper itemDefMapper;
+
+    /**
+     * 玩家技能 Mapper。
+     */
+    private final PlayerSkillMapper playerSkillMapper;
+
+    /**
+     * 钱包 Mapper。
+     */
+    private final WalletMapper walletMapper;
+
+    /**
+     * 钱包流水 Mapper。
+     */
+    private final WalletFlowMapper walletFlowMapper;
 
     /**
      * 库存消耗前准备服务。
@@ -130,14 +151,25 @@ public class CraftTaskSettleService {
             }
 
             consumeCost(craftTask.getPlayerId(), snapshot.getCostMap());
-            grantOutput(craftTask.getPlayerId(), craftTask.getServerId(), snapshot.getOutputMap());
 
-            if (snapshot.getExpGain() != null && snapshot.getExpGain().longValue() > 0L) {
-                professionSkillExpService.applySkillExp(
+            boolean success = rollCraftSuccess(craftTask.getPlayerId(), snapshot);
+            if (success) {
+                grantOutput(craftTask.getPlayerId(), craftTask.getServerId(), snapshot.getOutputMap());
+                grantCurrencyOutput(
                         craftTask.getPlayerId(),
-                        snapshot.getSkillCode(),
-                        snapshot.getExpGain()
+                        craftTask.getServerId(),
+                        rootTask.getId(),
+                        roundFinishTime,
+                        resolveCurrencyOutputMap(snapshot)
                 );
+
+                if (snapshot.getExpGain() != null && snapshot.getExpGain().longValue() > 0L) {
+                    professionSkillExpService.applySkillExp(
+                            craftTask.getPlayerId(),
+                            snapshot.getSkillCode(),
+                            snapshot.getExpGain()
+                    );
+                }
             }
 
             craftTask.setCompletedCount(craftTask.getSafeCompletedCount() + 1L);
@@ -211,11 +243,14 @@ public class CraftTaskSettleService {
             JsonNode root = objectMapper.readTree(recipeSnapshotJson);
             RecipeSnapshot snapshot = new RecipeSnapshot();
             snapshot.setRecipeCode(readText(root, "recipeCode"));
+            snapshot.setSkillId(readLong(root, "skillId", 0L));
             snapshot.setSkillCode(readText(root, "skillCode"));
             snapshot.setCraftTimeMs(readInt(root, "craftTimeMs", 0));
+            snapshot.setCraftLevelReq(readInt(root, "craftLevelReq", 1));
             snapshot.setExpGain(readLong(root, "expGain", 0L));
             snapshot.setCostMap(readLongMap(root.get("costMap")));
             snapshot.setOutputMap(readLongMap(root.get("outputMap")));
+            snapshot.setMetaJson(readText(root, "metaJson"));
             return snapshot;
         } catch (Exception exception) {
             throw new IllegalStateException("解析制造配方快照失败", exception);
@@ -295,6 +330,261 @@ public class CraftTaskSettleService {
             }
 
             result.put(itemId, quantity);
+        }
+        return result;
+    }
+
+    /**
+     * 判断本轮制造是否成功。
+     *
+     * @param playerId 玩家ID
+     * @param snapshot 配方快照
+     * @return true-成功，false-失败
+     */
+    private boolean rollCraftSuccess(Long playerId, RecipeSnapshot snapshot) {
+        double successRate = resolveSuccessRate(playerId, snapshot);
+        if (successRate <= 0D) {
+            return false;
+        }
+        if (successRate >= 100D) {
+            return true;
+        }
+        return Math.random() * 100D < successRate;
+    }
+
+    /**
+     * 解析当前轮成功率。
+     *
+     * 说明：
+     * 1. 只有 metaJson 配了 successRule 的配方才走动态成功率；
+     * 2. 其他旧制造配方保持 100% 成功，不影响现有链路。
+     *
+     * @param playerId 玩家ID
+     * @param snapshot 配方快照
+     * @return 成功率
+     */
+    private double resolveSuccessRate(Long playerId, RecipeSnapshot snapshot) {
+        JsonNode metaNode = parseMetaJson(snapshot == null ? null : snapshot.getMetaJson());
+        JsonNode successRuleNode = metaNode == null ? null : metaNode.get("successRule");
+        if (successRuleNode == null || successRuleNode.isNull() || !successRuleNode.isObject()) {
+            return 100D;
+        }
+
+        double base = readDouble(successRuleNode, "base", 50D);
+        double belowDelta = readDouble(successRuleNode, "belowDelta", 2D);
+        double aboveDelta = readDouble(successRuleNode, "aboveDelta", 0.5D);
+        int requiredLevel = snapshot == null || snapshot.getCraftLevelReq() == null
+                ? 1
+                : Math.max(snapshot.getCraftLevelReq().intValue(), 1);
+        int currentLevel = resolvePlayerSkillLevel(playerId, snapshot == null ? null : snapshot.getSkillId());
+
+        double rate = base;
+        if (currentLevel < requiredLevel) {
+            rate = base - (requiredLevel - currentLevel) * belowDelta;
+        } else if (currentLevel > requiredLevel) {
+            rate = base + (currentLevel - requiredLevel) * aboveDelta;
+        }
+
+        if (rate < 0D) {
+            return 0D;
+        }
+        if (rate > 100D) {
+            return 100D;
+        }
+        return rate;
+    }
+
+    /**
+     * 解析玩家当前技能等级。
+     *
+     * @param playerId 玩家ID
+     * @param skillId 技能ID
+     * @return 当前等级
+     */
+    private int resolvePlayerSkillLevel(Long playerId, Long skillId) {
+        if (playerId == null || skillId == null || skillId.longValue() <= 0L) {
+            return 1;
+        }
+
+        PlayerSkillEntity playerSkill = playerSkillMapper.selectOne(
+                new LambdaQueryWrapper<PlayerSkillEntity>()
+                        .eq(PlayerSkillEntity::getPlayerId, playerId)
+                        .eq(PlayerSkillEntity::getSkillId, skillId)
+                        .eq(PlayerSkillEntity::getDeleteFlag, 0)
+                        .last("limit 1")
+        );
+        if (playerSkill == null || playerSkill.getSkillLevel() == null || playerSkill.getSkillLevel().intValue() <= 0) {
+            return 1;
+        }
+        return playerSkill.getSkillLevel().intValue();
+    }
+
+    /**
+     * 解析配方里的货币产出。
+     *
+     * @param snapshot 配方快照
+     * @return 货币产出 map
+     */
+    private Map<String, Long> resolveCurrencyOutputMap(RecipeSnapshot snapshot) {
+        JsonNode metaNode = parseMetaJson(snapshot == null ? null : snapshot.getMetaJson());
+        if (metaNode == null) {
+            return new LinkedHashMap<String, Long>();
+        }
+        return readStringLongMap(metaNode.get("currencyOutput"));
+    }
+
+    /**
+     * 发放货币产出。
+     *
+     * @param playerId 玩家ID
+     * @param serverId 区服ID
+     * @param taskId 根任务ID
+     * @param flowTime 流水时间
+     * @param currencyOutputMap 货币产出
+     */
+    private void grantCurrencyOutput(Long playerId,
+                                     Integer serverId,
+                                     Long taskId,
+                                     LocalDateTime flowTime,
+                                     Map<String, Long> currencyOutputMap) {
+        if (currencyOutputMap == null || currencyOutputMap.isEmpty()) {
+            return;
+        }
+
+        for (Map.Entry<String, Long> entry : currencyOutputMap.entrySet()) {
+            String currencyCode = entry.getKey();
+            Long delta = entry.getValue();
+            if (currencyCode == null || currencyCode.trim().isEmpty() || delta == null || delta.longValue() <= 0L) {
+                continue;
+            }
+            addWalletBalance(playerId, serverId, currencyCode.trim(), delta.longValue(), taskId, flowTime);
+        }
+    }
+
+    /**
+     * 增加钱包余额并记录流水。
+     *
+     * @param playerId 玩家ID
+     * @param serverId 区服ID
+     * @param currencyCode 币种
+     * @param delta 增量
+     * @param taskId 根任务ID
+     * @param flowTime 流水时间
+     */
+    private void addWalletBalance(Long playerId,
+                                  Integer serverId,
+                                  String currencyCode,
+                                  long delta,
+                                  Long taskId,
+                                  LocalDateTime flowTime) {
+        if (playerId == null || delta <= 0L) {
+            return;
+        }
+
+        WalletEntity wallet = walletMapper.selectOne(
+                new LambdaQueryWrapper<WalletEntity>()
+                        .eq(WalletEntity::getPlayerId, playerId)
+                        .eq(WalletEntity::getCurrencyCode, currencyCode)
+                        .eq(WalletEntity::getDeleteFlag, 0)
+                        .last("limit 1")
+        );
+
+        long balanceAfter = delta;
+        if (wallet == null) {
+            wallet = new WalletEntity();
+            wallet.setPlayerId(playerId);
+            wallet.setServerId(serverId == null ? 1 : serverId);
+            wallet.setCurrencyCode(currencyCode);
+            wallet.setBalance(delta);
+            wallet.setRemarks("craft_reward_currency");
+            wallet.setCreateUser("-1");
+            wallet.setUpdateUser("-1");
+            walletMapper.insert(wallet);
+        } else {
+            long currentBalance = wallet.getBalance() == null ? 0L : wallet.getBalance().longValue();
+            balanceAfter = currentBalance + delta;
+            wallet.setBalance(balanceAfter);
+            wallet.setUpdateUser("-1");
+            walletMapper.updateById(wallet);
+        }
+
+        if (wallet.getBalance() != null) {
+            balanceAfter = wallet.getBalance().longValue();
+        }
+
+        WalletFlowEntity walletFlow = new WalletFlowEntity();
+        walletFlow.setPlayerId(playerId);
+        walletFlow.setServerId(serverId == null ? 1 : serverId);
+        walletFlow.setCurrencyCode(currencyCode);
+        walletFlow.setDelta(delta);
+        walletFlow.setBalanceAfter(balanceAfter);
+        walletFlow.setReason("CRAFT");
+        walletFlow.setRefType("ACTION_TASK");
+        walletFlow.setRefId(taskId);
+        walletFlow.setRequestId(null);
+        walletFlow.setFlowTime(flowTime == null ? LocalDateTime.now() : flowTime);
+        walletFlow.setRemarks("craft_reward_currency");
+        walletFlow.setCreateUser("-1");
+        walletFlow.setUpdateUser("-1");
+        walletFlowMapper.insert(walletFlow);
+    }
+
+    /**
+     * 解析 metaJson。
+     *
+     * @param metaJson 扩展 JSON
+     * @return JSON 节点
+     */
+    private JsonNode parseMetaJson(String metaJson) {
+        if (metaJson == null || metaJson.trim().isEmpty()) {
+            return null;
+        }
+        try {
+            return objectMapper.readTree(metaJson);
+        } catch (Exception ignore) {
+            return null;
+        }
+    }
+
+    /**
+     * 读取 double 字段。
+     *
+     * @param root 根节点
+     * @param fieldName 字段名
+     * @param defaultValue 默认值
+     * @return double 值
+     */
+    private double readDouble(JsonNode root, String fieldName, double defaultValue) {
+        if (root == null || fieldName == null) {
+            return defaultValue;
+        }
+        JsonNode node = root.get(fieldName);
+        return node == null || node.isNull() ? defaultValue : node.asDouble(defaultValue);
+    }
+
+    /**
+     * 读取字符串到长整数的 map。
+     *
+     * @param root 根节点
+     * @return map
+     */
+    private Map<String, Long> readStringLongMap(JsonNode root) {
+        Map<String, Long> result = new LinkedHashMap<String, Long>();
+        if (root == null || root.isNull() || !root.isObject()) {
+            return result;
+        }
+
+        Iterator<Map.Entry<String, JsonNode>> iterator = root.fields();
+        while (iterator.hasNext()) {
+            Map.Entry<String, JsonNode> entry = iterator.next();
+            if (entry == null || entry.getKey() == null || entry.getValue() == null) {
+                continue;
+            }
+            long quantity = entry.getValue().asLong(0L);
+            if (quantity <= 0L) {
+                continue;
+            }
+            result.put(entry.getKey(), quantity);
         }
         return result;
     }
@@ -572,6 +862,11 @@ public class CraftTaskSettleService {
         private String recipeCode;
 
         /**
+         * 技能ID。
+         */
+        private Long skillId;
+
+        /**
          * 技能编码。
          */
         private String skillCode;
@@ -580,6 +875,11 @@ public class CraftTaskSettleService {
          * 耗时。
          */
         private Integer craftTimeMs;
+
+        /**
+         * 需求等级。
+         */
+        private Integer craftLevelReq;
 
         /**
          * 经验。
@@ -595,5 +895,10 @@ public class CraftTaskSettleService {
          * 产出 map。
          */
         private Map<Long, Long> outputMap;
+
+        /**
+         * 扩展 JSON。
+         */
+        private String metaJson;
     }
 }

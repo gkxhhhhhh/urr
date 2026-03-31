@@ -373,6 +373,9 @@ public class CraftTaskAppServiceImpl implements CraftTaskAppService {
         if (recipeDef == null) {
             return;
         }
+        if (allowBelowLevelAttempt(recipeDef)) {
+            return;
+        }
         int requiredLevel = recipeDef.getCraftLevelReq() == null ? 1 : recipeDef.getCraftLevelReq().intValue();
         if (actionDef != null && actionDef.getMinSkillLevel() != null && actionDef.getMinSkillLevel().intValue() > requiredLevel) {
             requiredLevel = actionDef.getMinSkillLevel().intValue();
@@ -380,6 +383,25 @@ public class CraftTaskAppServiceImpl implements CraftTaskAppService {
         int currentLevel = resolvePlayerSkillLevel(playerId, recipeDef.getCraftSkillId());
         if (currentLevel < requiredLevel) {
             throw new IllegalStateException("制造等级不足");
+        }
+    }
+
+    /**
+     * 判断配方是否允许低于需求等级尝试。
+     *
+     * @param recipeDef 配方
+     * @return true-允许，false-不允许
+     */
+    private boolean allowBelowLevelAttempt(RecipeDefEntity recipeDef) {
+        if (recipeDef == null || !StringUtils.hasText(recipeDef.getMetaJson())) {
+            return false;
+        }
+        try {
+            JsonNode root = objectMapper.readTree(recipeDef.getMetaJson());
+            JsonNode node = root.get("allowBelowLevelAttempt");
+            return node != null && !node.isNull() && node.asBoolean(false);
+        } catch (Exception ignore) {
+            return false;
         }
     }
 
@@ -522,9 +544,11 @@ public class CraftTaskAppServiceImpl implements CraftTaskAppService {
             snapshot.put("skillId", recipeDef.getCraftSkillId());
             snapshot.put("skillCode", resolveSkillCode(recipeDef.getCraftSkillId()));
             snapshot.put("craftTimeMs", recipeDef.getCraftTimeMs());
+            snapshot.put("craftLevelReq", recipeDef.getCraftLevelReq());
             snapshot.put("expGain", recipeDef.getExpGain());
             snapshot.put("costMap", normalizeJsonObject(recipeDef.getCostJson()));
             snapshot.put("outputMap", normalizeJsonObject(recipeDef.getOutputJson()));
+            snapshot.put("metaJson", recipeDef.getMetaJson());
             return objectMapper.writeValueAsString(snapshot);
         } catch (Exception exception) {
             throw new IllegalStateException("生成制造配方快照失败", exception);

@@ -210,6 +210,10 @@ public class GatherTaskRewardGenerator {
             return null;
         }
 
+        if (!shouldLoadAsGatherRewardConfig(action, root)) {
+            return null;
+        }
+
         List<ActionRewardItemConfig> rewardItems = readRewardItemConfigsFromRoot(root);
         if (rewardItems.isEmpty()) {
             return null;
@@ -227,6 +231,36 @@ public class GatherTaskRewardGenerator {
         validateRewardConfig(config);
         return config;
     }
+
+    /**
+     * 判断当前动作是否应该按采集奖励配置加载。
+     *
+     * @param action 动作定义
+     * @param root   params_json 根节点
+     * @return true=采集奖励动作
+     */
+    private boolean shouldLoadAsGatherRewardConfig(ActionDefEntity action, JsonNode root) {
+        if (action == null || !StringUtils.hasText(action.getActionCode()) || root == null) {
+            return false;
+        }
+
+        String actionCode = action.getActionCode().trim();
+        if (!actionCode.startsWith("GATHER_")) {
+            return false;
+        }
+
+        boolean hasItemCode = StringUtils.hasText(readText(root, "itemCode"));
+        JsonNode rewardListNode = root.get("rewardList");
+        boolean hasRewardList = rewardListNode != null && rewardListNode.isArray() && rewardListNode.size() > 0;
+
+        if (!hasItemCode && !hasRewardList) {
+            return false;
+        }
+
+        return true;
+    }
+
+
 
     /**
      * 读取动作 params_json。
