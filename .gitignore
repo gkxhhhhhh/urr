@@ -2,3 +2,4 @@
 target/
 *.class
 .idea/sqldialects.xml
+/urr-api/src/main/resources/application-prod.yml
