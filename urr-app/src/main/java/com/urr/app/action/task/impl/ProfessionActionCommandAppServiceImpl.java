@@ -290,6 +290,12 @@ public class ProfessionActionCommandAppServiceImpl implements ProfessionActionCo
         startCommand.setPlayerId(command.getPlayerId());
         startCommand.setActionCode(command.getActionCode());
         startCommand.setTargetCount(command.getTargetCount());
+        startCommand.setEquipInstanceId(command.getEquipInstanceId());
+        startCommand.setTeaType(command.getTeaType());
+        startCommand.setBlessedTeaUsed(command.getBlessedTeaUsed());
+        startCommand.setDrinkConcentration(command.getDrinkConcentration());
+        startCommand.setObservatoryLevel(command.getObservatoryLevel());
+        startCommand.setExtraSuccessRate(command.getExtraSuccessRate());
         return startCommand;
     }
 
@@ -305,6 +311,12 @@ public class ProfessionActionCommandAppServiceImpl implements ProfessionActionCo
         enqueueCommand.setPlayerId(command.getPlayerId());
         enqueueCommand.setActionCode(command.getActionCode());
         enqueueCommand.setTargetCount(command.getTargetCount());
+        enqueueCommand.setEquipInstanceId(command.getEquipInstanceId());
+        enqueueCommand.setTeaType(command.getTeaType());
+        enqueueCommand.setBlessedTeaUsed(command.getBlessedTeaUsed());
+        enqueueCommand.setDrinkConcentration(command.getDrinkConcentration());
+        enqueueCommand.setObservatoryLevel(command.getObservatoryLevel());
+        enqueueCommand.setExtraSuccessRate(command.getExtraSuccessRate());
         return enqueueCommand;
     }
 

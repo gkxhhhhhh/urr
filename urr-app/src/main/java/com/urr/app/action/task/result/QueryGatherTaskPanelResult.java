@@ -206,6 +206,14 @@ public class QueryGatherTaskPanelResult {
         private Long formalQuantity;
         private Long pendingQuantity;
         private Long displayQuantity;
+        private Long itemId;
+        private Long equipInstanceId;
+        private Integer itemType;
+        private Integer itemLevel;
+        private Integer strengthenLevel;
+        private String equipCategory;
+        private Double baseAttack;
+        private Double currentAttack;
     }
 
     /**

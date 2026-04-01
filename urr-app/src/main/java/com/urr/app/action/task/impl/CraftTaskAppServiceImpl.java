@@ -25,11 +25,13 @@ import com.urr.domain.action.task.PlayerActionTask;
 import com.urr.domain.action.task.PlayerActionTaskEntity;
 import com.urr.domain.action.task.PlayerCraftTask;
 import com.urr.domain.craft.RecipeDefEntity;
+import com.urr.domain.item.PlayerEquipEntity;
 import com.urr.domain.player.PlayerEntity;
 import com.urr.domain.skill.PlayerSkillEntity;
 import com.urr.domain.skill.SkillDefEntity;
 import com.urr.infra.mapper.ActionDefMapper;
 import com.urr.infra.mapper.PlayerActionTaskMapper;
+import com.urr.infra.mapper.PlayerEquipMapper;
 import com.urr.infra.mapper.PlayerMapper;
 import com.urr.infra.mapper.PlayerSkillMapper;
 import com.urr.infra.mapper.SkillDefMapper;
@@ -81,6 +83,11 @@ public class CraftTaskAppServiceImpl implements CraftTaskAppService {
     private final PlayerActionTaskRepository playerActionTaskRepository;
 
     /**
+     * 玩家装备实例 Mapper。
+     */
+    private final PlayerEquipMapper playerEquipMapper;
+
+    /**
      * 动作队列仓储。
      */
     private final PlayerActionQueueRepository playerActionQueueRepository;
@@ -120,6 +127,7 @@ public class CraftTaskAppServiceImpl implements CraftTaskAppService {
         String recipeCode = resolveRecipeCode(actionDef);
         RecipeDefEntity recipeDef = requireRecipe(recipeCode);
         validateCraftLevel(player.getId(), recipeDef, actionDef);
+        validateStrengtheningStartCommand(player.getId(), recipeDef, actionDef, command);
         LocalDateTime now = LocalDateTime.now();
         Long replacedTaskId = replaceRunningTaskIfNecessary(player.getId(), now);
         PlayerActionTaskEntity rootTask = buildRootTask(player, actionDef, now);
@@ -127,7 +135,7 @@ public class CraftTaskAppServiceImpl implements CraftTaskAppService {
         if (insertRows != 1 || rootTask.getId() == null) {
             throw new IllegalStateException("创建制造根任务失败");
         }
-        PlayerCraftTask craftTask = buildCraftTask(rootTask, player, actionDef, recipeDef, command.getTargetCount(), now);
+        PlayerCraftTask craftTask = buildCraftTask(rootTask, player, actionDef, recipeDef, command, now);
         playerCraftTaskRepository.insert(craftTask);
         return buildStartNowResult(rootTask.getId(), player.getId(), actionDef.getActionCode(), command.getTargetCount(), replacedTaskId);
     }
@@ -147,6 +155,7 @@ public class CraftTaskAppServiceImpl implements CraftTaskAppService {
         String recipeCode = resolveRecipeCode(actionDef);
         RecipeDefEntity recipeDef = requireRecipe(recipeCode);
         validateCraftLevel(player.getId(), recipeDef, actionDef);
+        validateStrengtheningEnqueueCommand(recipeDef, actionDef);
         PlayerActionTask runningTask = playerActionTaskRepository.findRunningByPlayerId(player.getId());
         if (runningTask == null) {
             StartGatherTaskCommand startCommand = new StartGatherTaskCommand();
@@ -154,6 +163,12 @@ public class CraftTaskAppServiceImpl implements CraftTaskAppService {
             startCommand.setPlayerId(command.getPlayerId());
             startCommand.setActionCode(command.getActionCode());
             startCommand.setTargetCount(command.getTargetCount());
+            startCommand.setEquipInstanceId(command.getEquipInstanceId());
+            startCommand.setTeaType(command.getTeaType());
+            startCommand.setBlessedTeaUsed(command.getBlessedTeaUsed());
+            startCommand.setDrinkConcentration(command.getDrinkConcentration());
+            startCommand.setObservatoryLevel(command.getObservatoryLevel());
+            startCommand.setExtraSuccessRate(command.getExtraSuccessRate());
             return startNow(startCommand);
         }
         long queuedCount = playerActionQueueRepository.countQueuedByPlayerId(player.getId());
@@ -507,7 +522,7 @@ public class CraftTaskAppServiceImpl implements CraftTaskAppService {
                                            PlayerEntity player,
                                            ActionDefEntity actionDef,
                                            RecipeDefEntity recipeDef,
-                                           Long targetCount,
+                                           StartGatherTaskCommand command,
                                            LocalDateTime now) {
         PlayerCraftTask task = new PlayerCraftTask();
         task.setId(rootTask.getId());
@@ -521,9 +536,10 @@ public class CraftTaskAppServiceImpl implements CraftTaskAppService {
         task.setRewardSeed(rootTask.getRewardSeed());
         task.setStatus(ActionTaskStatusEnum.RUNNING);
         task.setStopReason(null);
+        Long targetCount = command == null ? null : command.getTargetCount();
         task.setTargetCount(targetCount != null && targetCount.longValue() == ActionTaskConstants.INFINITE_TARGET_COUNT ? 0L : targetCount);
         task.setCompletedCount(0L);
-        task.setRecipeSnapshotJson(buildRecipeSnapshotJson(actionDef, recipeDef));
+        task.setRecipeSnapshotJson(buildRecipeSnapshotJson(actionDef, recipeDef, command));
         LocalDateTime firstFinishTime = now.plusNanos(recipeDef.getCraftTimeMs().longValue() * 1_000_000L);
         task.setNextRoundFinishTime(CraftTaskTimeSupport.toEpochMilli(firstFinishTime));
         return task;
@@ -536,7 +552,7 @@ public class CraftTaskAppServiceImpl implements CraftTaskAppService {
      * @param recipeDef 配方
      * @return 快照 JSON
      */
-    private String buildRecipeSnapshotJson(ActionDefEntity actionDef, RecipeDefEntity recipeDef) {
+    private String buildRecipeSnapshotJson(ActionDefEntity actionDef, RecipeDefEntity recipeDef, StartGatherTaskCommand command) {
         try {
             Map<String, Object> snapshot = new LinkedHashMap<String, Object>();
             snapshot.put("actionCode", actionDef.getActionCode());
@@ -548,11 +564,153 @@ public class CraftTaskAppServiceImpl implements CraftTaskAppService {
             snapshot.put("expGain", recipeDef.getExpGain());
             snapshot.put("costMap", normalizeJsonObject(recipeDef.getCostJson()));
             snapshot.put("outputMap", normalizeJsonObject(recipeDef.getOutputJson()));
-            snapshot.put("metaJson", recipeDef.getMetaJson());
+            snapshot.put("metaJson", buildRecipeMetaJson(recipeDef, command));
             return objectMapper.writeValueAsString(snapshot);
         } catch (Exception exception) {
             throw new IllegalStateException("生成制造配方快照失败", exception);
         }
+    }
+
+    /**
+     * 构建配方 metaJson。
+     *
+     * @param recipeDef 配方定义
+     * @param command 开始命令
+     * @return 合并后的 metaJson
+     */
+    private String buildRecipeMetaJson(RecipeDefEntity recipeDef, StartGatherTaskCommand command) {
+        try {
+            JsonNode root = objectMapper.readTree(StringUtils.hasText(recipeDef.getMetaJson()) ? recipeDef.getMetaJson() : "{}");
+            Map<String, Object> metaMap = objectMapper.convertValue(root, Map.class);
+            if (metaMap == null) {
+                metaMap = new LinkedHashMap<String, Object>();
+            }
+            if (command != null && command.getEquipInstanceId() != null) {
+                metaMap.put("equipInstanceId", command.getEquipInstanceId());
+                metaMap.put("teaType", normalizeTeaType(command.getTeaType()));
+                metaMap.put("blessedTeaUsed", Boolean.TRUE.equals(command.getBlessedTeaUsed()));
+                metaMap.put("drinkConcentration", normalizeNonNegativeDouble(command.getDrinkConcentration()));
+                metaMap.put("observatoryLevel", normalizeNonNegativeInteger(command.getObservatoryLevel()));
+                metaMap.put("extraSuccessRate", normalizeNonNegativeDouble(command.getExtraSuccessRate()));
+            }
+            return objectMapper.writeValueAsString(metaMap);
+        } catch (Exception exception) {
+            if (!StringUtils.hasText(recipeDef.getMetaJson())) {
+                return "{}";
+            }
+            return recipeDef.getMetaJson();
+        }
+    }
+
+    /**
+     * 校验强化立即开始命令。
+     *
+     * @param playerId 玩家ID
+     * @param recipeDef 配方定义
+     * @param actionDef 动作定义
+     * @param command 开始命令
+     */
+    private void validateStrengtheningStartCommand(Long playerId,
+                                                   RecipeDefEntity recipeDef,
+                                                   ActionDefEntity actionDef,
+                                                   StartGatherTaskCommand command) {
+        if (!isStrengtheningRecipe(recipeDef)) {
+            return;
+        }
+        if (command == null || command.getEquipInstanceId() == null) {
+            throw new IllegalArgumentException("强化需要选择装备实例");
+        }
+        if (command.getTargetCount() == null || command.getTargetCount().longValue() != 1L) {
+            throw new IllegalArgumentException("当前版本强化只支持单次立即开始");
+        }
+        PlayerEquipEntity equip = playerEquipMapper.selectById(command.getEquipInstanceId());
+        if (equip == null || equip.getDeleteFlag() != null && equip.getDeleteFlag().intValue() != 0) {
+            throw new IllegalArgumentException("强化目标装备不存在");
+        }
+        if (!playerId.equals(equip.getPlayerId())) {
+            throw new IllegalArgumentException("当前装备不属于该角色");
+        }
+        if (equip.getState() == null || equip.getState().intValue() != 1) {
+            throw new IllegalArgumentException("当前版本只允许强化背包中的装备");
+        }
+        if (actionDef == null || !StringUtils.hasText(actionDef.getActionCode())) {
+            throw new IllegalArgumentException("强化动作不存在");
+        }
+    }
+
+    /**
+     * 校验强化入队命令。
+     *
+     * @param recipeDef 配方定义
+     * @param actionDef 动作定义
+     */
+    private void validateStrengtheningEnqueueCommand(RecipeDefEntity recipeDef, ActionDefEntity actionDef) {
+        if (!isStrengtheningRecipe(recipeDef)) {
+            return;
+        }
+        throw new IllegalArgumentException("当前版本强化只支持立即开始，不支持加入队列");
+    }
+
+    /**
+     * 判断是否强化配方。
+     *
+     * @param recipeDef 配方定义
+     * @return true-强化配方，false-非强化配方
+     */
+    private boolean isStrengtheningRecipe(RecipeDefEntity recipeDef) {
+        if (recipeDef == null || !StringUtils.hasText(recipeDef.getMetaJson())) {
+            return false;
+        }
+        try {
+            JsonNode root = objectMapper.readTree(recipeDef.getMetaJson());
+            JsonNode node = root.get("strengthening");
+            return node != null && !node.isNull() && node.asBoolean(false);
+        } catch (Exception ignore) {
+            return false;
+        }
+    }
+
+    /**
+     * 规范化茶类型。
+     *
+     * @param teaType 原始茶类型
+     * @return 茶类型
+     */
+    private String normalizeTeaType(String teaType) {
+        if (!StringUtils.hasText(teaType)) {
+            return "NONE";
+        }
+        String normalized = teaType.trim().toUpperCase();
+        if ("NORMAL".equals(normalized) || "SUPER".equals(normalized) || "ULTRA".equals(normalized)) {
+            return normalized;
+        }
+        return "NONE";
+    }
+
+    /**
+     * 规范化非负整数。
+     *
+     * @param value 原始值
+     * @return 规范化结果
+     */
+    private Integer normalizeNonNegativeInteger(Integer value) {
+        if (value == null || value.intValue() < 0) {
+            return 0;
+        }
+        return value;
+    }
+
+    /**
+     * 规范化非负小数。
+     *
+     * @param value 原始值
+     * @return 规范化结果
+     */
+    private Double normalizeNonNegativeDouble(Double value) {
+        if (value == null || value.doubleValue() < 0D) {
+            return 0D;
+        }
+        return value;
     }
 
     /**

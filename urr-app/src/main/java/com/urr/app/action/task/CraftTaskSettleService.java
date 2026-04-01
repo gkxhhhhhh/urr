@@ -3,6 +3,7 @@ package com.urr.app.action.task;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.urr.domain.action.task.ActionTaskStatusEnum;
 import com.urr.domain.action.task.ActionTaskStopReasonEnum;
 import com.urr.domain.action.task.CraftTaskTimeSupport;
@@ -10,12 +11,14 @@ import com.urr.domain.action.task.PlayerActionTask;
 import com.urr.domain.action.task.PlayerActionTaskEntity;
 import com.urr.domain.action.task.PlayerCraftTask;
 import com.urr.domain.item.ItemDefEntity;
+import com.urr.domain.item.PlayerEquipEntity;
 import com.urr.domain.item.PlayerItemStackEntity;
 import com.urr.domain.skill.PlayerSkillEntity;
 import com.urr.domain.wallet.WalletEntity;
 import com.urr.domain.wallet.WalletFlowEntity;
 import com.urr.infra.mapper.ItemDefMapper;
 import com.urr.infra.mapper.PlayerActionTaskMapper;
+import com.urr.infra.mapper.PlayerEquipMapper;
 import com.urr.infra.mapper.PlayerItemStackMapper;
 import com.urr.infra.mapper.PlayerSkillMapper;
 import com.urr.infra.mapper.WalletFlowMapper;
@@ -57,6 +60,11 @@ public class CraftTaskSettleService {
      * 玩家物品堆叠 Mapper。
      */
     private final PlayerItemStackMapper playerItemStackMapper;
+
+    /**
+     * 玩家装备实例 Mapper。
+     */
+    private final PlayerEquipMapper playerEquipMapper;
 
     /**
      * 物品定义 Mapper。
@@ -154,7 +162,11 @@ public class CraftTaskSettleService {
 
             boolean success = rollCraftSuccess(craftTask.getPlayerId(), snapshot);
             if (success) {
-                grantOutput(craftTask.getPlayerId(), craftTask.getServerId(), snapshot.getOutputMap());
+                if (isStrengtheningSnapshot(snapshot)) {
+                    applyStrengtheningSuccess(craftTask.getPlayerId(), craftTask.getServerId(), snapshot);
+                } else {
+                    grantOutput(craftTask.getPlayerId(), craftTask.getServerId(), snapshot.getOutputMap());
+                }
                 grantCurrencyOutput(
                         craftTask.getPlayerId(),
                         craftTask.getServerId(),
@@ -365,6 +377,9 @@ public class CraftTaskSettleService {
      */
     private double resolveSuccessRate(Long playerId, RecipeSnapshot snapshot) {
         JsonNode metaNode = parseMetaJson(snapshot == null ? null : snapshot.getMetaJson());
+        if (isStrengtheningSnapshot(snapshot)) {
+            return resolveStrengtheningSuccessRate(playerId, snapshot, metaNode) * 100D;
+        }
         JsonNode successRuleNode = metaNode == null ? null : metaNode.get("successRule");
         if (successRuleNode == null || successRuleNode.isNull() || !successRuleNode.isObject()) {
             return 100D;
@@ -530,6 +545,338 @@ public class CraftTaskSettleService {
     }
 
     /**
+     * 判断是否强化快照。
+     *
+     * @param snapshot 配方快照
+     * @return true-强化，false-非强化
+     */
+    private boolean isStrengtheningSnapshot(RecipeSnapshot snapshot) {
+        JsonNode metaNode = parseMetaJson(snapshot == null ? null : snapshot.getMetaJson());
+        return metaNode != null && metaNode.path("strengthening").asBoolean(false);
+    }
+
+    /**
+     * 解析强化成功率。
+     *
+     * @param playerId 玩家ID
+     * @param snapshot 配方快照
+     * @param metaNode meta 节点
+     * @return 0~1 成功率
+     */
+    private double resolveStrengtheningSuccessRate(Long playerId, RecipeSnapshot snapshot, JsonNode metaNode) {
+        if (metaNode == null) {
+            return 0D;
+        }
+        PlayerEquipEntity equip = requireStrengtheningEquip(playerId, metaNode.path("equipInstanceId").asLong(0L));
+        ItemDefEntity itemDef = itemDefMapper.selectById(equip.getItemId());
+        JsonNode itemMetaNode = parseMetaJson(itemDef == null ? null : itemDef.getMetaJson());
+        JsonNode attrNode = parseMetaJson(equip.getAttrJson());
+
+        int currentStrengthenLevel = readInt(attrNode, "strengthenLevel", 0);
+        if (currentStrengthenLevel >= 20) {
+            return 0D;
+        }
+        int targetLevel = currentStrengthenLevel + 1;
+        double baseSuccessRate = resolveStrengtheningBaseSuccessRate(targetLevel);
+        int strengtheningSkillLevel = resolvePlayerSkillLevel(playerId, snapshot == null ? null : snapshot.getSkillId());
+        int itemLevel = Math.max(resolveStrengtheningItemLevel(itemMetaNode, attrNode), 1);
+        int observatoryLevel = Math.max(readInt(metaNode, "observatoryLevel", 0), 0);
+        double extraSuccessRate = Math.max(readDouble(metaNode, "extraSuccessRate", 0D), 0D);
+        double effectiveLevel = resolveEffectiveStrengtheningLevel(strengtheningSkillLevel, metaNode);
+
+        double correctionFactor;
+        if (effectiveLevel < itemLevel) {
+            correctionFactor = 0.5D + 0.5D * effectiveLevel / itemLevel + 0.0005D * observatoryLevel + extraSuccessRate;
+        } else {
+            correctionFactor = 1D + 0.0005D * (effectiveLevel + observatoryLevel - itemLevel) + extraSuccessRate;
+        }
+        double finalSuccessRate = baseSuccessRate * correctionFactor;
+        if (finalSuccessRate < 0D) {
+            return 0D;
+        }
+        if (finalSuccessRate > 1D) {
+            return 1D;
+        }
+        return finalSuccessRate;
+    }
+
+    /**
+     * 应用强化成功结果。
+     *
+     * @param playerId 玩家ID
+     * @param serverId 区服ID
+     * @param snapshot 配方快照
+     */
+    private void applyStrengtheningSuccess(Long playerId, Integer serverId, RecipeSnapshot snapshot) {
+        JsonNode metaNode = parseMetaJson(snapshot == null ? null : snapshot.getMetaJson());
+        PlayerEquipEntity equip = requireStrengtheningEquip(playerId, metaNode == null ? 0L : metaNode.path("equipInstanceId").asLong(0L));
+        ItemDefEntity itemDef = itemDefMapper.selectById(equip.getItemId());
+        JsonNode itemMetaNode = parseMetaJson(itemDef == null ? null : itemDef.getMetaJson());
+        JsonNode attrNode = parseMetaJson(equip.getAttrJson());
+
+        int currentStrengthenLevel = readInt(attrNode, "strengthenLevel", 0);
+        if (currentStrengthenLevel >= 20) {
+            return;
+        }
+        int increaseLevel = resolveStrengtheningIncreaseLevel(metaNode);
+        int nextStrengthenLevel = currentStrengthenLevel + increaseLevel;
+        if (nextStrengthenLevel > 20) {
+            nextStrengthenLevel = 20;
+        }
+
+        double baseAttack = readDouble(attrNode, "baseAttack", readDouble(itemMetaNode == null ? null : itemMetaNode.path("baseAttrs"), "attack", 0D));
+        int itemLevel = resolveStrengtheningItemLevel(itemMetaNode, attrNode);
+        double currentAttack = calculateStrengthenedAttack(baseAttack, nextStrengthenLevel);
+        equip.setAttrJson(buildStrengthenedAttrJson(attrNode, nextStrengthenLevel, itemLevel, baseAttack, currentAttack));
+        equip.setUpdateUser("-1");
+        playerEquipMapper.updateById(equip);
+    }
+
+    /**
+     * 解析强化成功后增加的等级。
+     *
+     * @param metaNode meta 节点
+     * @return 增加强化等级
+     */
+    private int resolveStrengtheningIncreaseLevel(JsonNode metaNode) {
+        if (metaNode == null || !metaNode.path("blessedTeaUsed").asBoolean(false)) {
+            return 1;
+        }
+        double concentration = Math.max(readDouble(metaNode, "drinkConcentration", 0D), 0D);
+        double guzzlingBonus = 1D + concentration;
+        double plusTwoConditionalRate = 0.01D * guzzlingBonus;
+        if (plusTwoConditionalRate > 1D) {
+            plusTwoConditionalRate = 1D;
+        }
+        return Math.random() < plusTwoConditionalRate ? 2 : 1;
+    }
+
+    /**
+     * 构建强化后的 attrJson。
+     *
+     * @param attrNode 原始扩展
+     * @param strengthenLevel 强化等级
+     * @param itemLevel 物品等级
+     * @param baseAttack 基础攻击
+     * @param currentAttack 当前攻击
+     * @return attrJson
+     */
+    private String buildStrengthenedAttrJson(JsonNode attrNode,
+                                             int strengthenLevel,
+                                             int itemLevel,
+                                             double baseAttack,
+                                             double currentAttack) {
+        ObjectNode node;
+        if (attrNode instanceof ObjectNode) {
+            node = (ObjectNode) attrNode.deepCopy();
+        } else {
+            node = objectMapper.createObjectNode();
+        }
+        node.put("strengthenLevel", strengthenLevel);
+        node.put("itemLevel", itemLevel);
+        node.put("baseAttack", roundNumber(baseAttack, 4));
+        node.put("currentAttack", roundNumber(currentAttack, 4));
+        return node.toString();
+    }
+
+    /**
+     * 解析强化基础成功率。
+     *
+     * @param targetLevel 目标强化等级
+     * @return 基础成功率
+     */
+    private double resolveStrengtheningBaseSuccessRate(int targetLevel) {
+        if (targetLevel <= 1) {
+            return 0.50D;
+        }
+        if (targetLevel <= 3) {
+            return 0.45D;
+        }
+        if (targetLevel <= 6) {
+            return 0.40D;
+        }
+        if (targetLevel <= 10) {
+            return 0.35D;
+        }
+        return 0.30D;
+    }
+
+    /**
+     * 解析有效强化等级。
+     *
+     * @param strengtheningSkillLevel 当前强化等级
+     * @param metaNode meta 节点
+     * @return 有效强化等级
+     */
+    private double resolveEffectiveStrengtheningLevel(int strengtheningSkillLevel, JsonNode metaNode) {
+        String teaType = metaNode == null ? "NONE" : metaNode.path("teaType").asText("NONE").trim().toUpperCase();
+        double concentration = Math.max(readDouble(metaNode, "drinkConcentration", 0D), 0D);
+        double guzzlingBonus = 1D + concentration;
+        double baseLevel = strengtheningSkillLevel;
+        if ("NORMAL".equals(teaType)) {
+            return baseLevel + 3D * guzzlingBonus;
+        }
+        if ("SUPER".equals(teaType)) {
+            return baseLevel + 6D * guzzlingBonus;
+        }
+        if ("ULTRA".equals(teaType)) {
+            return baseLevel + 8D * guzzlingBonus;
+        }
+        return baseLevel;
+    }
+
+    /**
+     * 解析强化装备的物品等级。
+     *
+     * @param itemMetaNode 物品 meta
+     * @param attrNode 装备 attr
+     * @return 物品等级
+     */
+    private int resolveStrengtheningItemLevel(JsonNode itemMetaNode, JsonNode attrNode) {
+        int attrItemLevel = readInt(attrNode, "itemLevel", 0);
+        if (attrItemLevel > 0) {
+            return attrItemLevel;
+        }
+        int itemLevel = readInt(itemMetaNode, "itemLevel", 0);
+        if (itemLevel > 0) {
+            return itemLevel;
+        }
+        int tier = readInt(itemMetaNode, "tier", 1);
+        return tier <= 0 ? 1 : tier;
+    }
+
+    /**
+     * 根据基础攻击和强化等级计算强化后攻击。
+     *
+     * @param baseAttack 基础攻击
+     * @param strengthenLevel 强化等级
+     * @return 当前攻击
+     */
+    private double calculateStrengthenedAttack(double baseAttack, int strengthenLevel) {
+        double value = baseAttack;
+        for (int level = 1; level <= strengthenLevel; level++) {
+            if (level <= 5) {
+                value = value * 1.023D;
+                continue;
+            }
+            if (level <= 10) {
+                value = value * 1.029D;
+                continue;
+            }
+            if (level <= 15) {
+                value = value * 1.04D;
+                continue;
+            }
+            value = value * 1.05D;
+        }
+        return roundNumber(value, 4);
+    }
+
+    /**
+     * 判断物品是否装备。
+     *
+     * @param itemDef 物品定义
+     * @return true-装备，false-非装备
+     */
+    private boolean isEquipmentItem(ItemDefEntity itemDef) {
+        if (itemDef == null) {
+            return false;
+        }
+        if (itemDef.getItemType() != null && itemDef.getItemType().intValue() == 4) {
+            return true;
+        }
+        return itemDef.getStackable() != null && itemDef.getStackable().intValue() == 0;
+    }
+
+    /**
+     * 发放装备产出。
+     *
+     * @param playerId 玩家ID
+     * @param serverId 区服ID
+     * @param itemDef 装备物品定义
+     * @param quantity 数量
+     */
+    private void grantEquipOutput(Long playerId, Integer serverId, ItemDefEntity itemDef, long quantity) {
+        if (itemDef == null || quantity <= 0L) {
+            return;
+        }
+        for (long i = 0L; i < quantity; i++) {
+            PlayerEquipEntity equip = new PlayerEquipEntity();
+            equip.setPlayerId(playerId);
+            equip.setServerId(serverId == null ? 1 : serverId);
+            equip.setItemId(itemDef.getId());
+            equip.setEquipSlot(null);
+            equip.setLevelReq(resolveStrengtheningItemLevel(parseMetaJson(itemDef.getMetaJson()), null));
+            equip.setBindType(itemDef.getBindType() == null ? 0 : itemDef.getBindType());
+            equip.setBindPlayerId(null);
+            equip.setDurability(100);
+            equip.setState(1);
+            equip.setAttrJson(buildInitialEquipAttrJson(itemDef));
+            equip.setRemarks("craft_reward_equip");
+            equip.setCreateUser("-1");
+            equip.setUpdateUser("-1");
+            playerEquipMapper.insert(equip);
+        }
+    }
+
+    /**
+     * 构建装备初始 attrJson。
+     *
+     * @param itemDef 物品定义
+     * @return 初始 attrJson
+     */
+    private String buildInitialEquipAttrJson(ItemDefEntity itemDef) {
+        JsonNode itemMetaNode = parseMetaJson(itemDef == null ? null : itemDef.getMetaJson());
+        int itemLevel = resolveStrengtheningItemLevel(itemMetaNode, null);
+        double baseAttack = readDouble(itemMetaNode == null ? null : itemMetaNode.path("baseAttrs"), "attack", 0D);
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("strengthenLevel", 0);
+        node.put("itemLevel", itemLevel);
+        node.put("baseAttack", roundNumber(baseAttack, 4));
+        node.put("currentAttack", roundNumber(baseAttack, 4));
+        return node.toString();
+    }
+
+    /**
+     * 读取强化目标装备。
+     *
+     * @param playerId 玩家ID
+     * @param equipInstanceId 装备实例ID
+     * @return 装备实例
+     */
+    private PlayerEquipEntity requireStrengtheningEquip(Long playerId, Long equipInstanceId) {
+        if (equipInstanceId == null || equipInstanceId.longValue() <= 0L) {
+            throw new IllegalStateException("强化快照缺少装备实例ID");
+        }
+        PlayerEquipEntity equip = playerEquipMapper.selectById(equipInstanceId);
+        if (equip == null) {
+            throw new IllegalStateException("强化目标装备不存在，equipInstanceId=" + equipInstanceId);
+        }
+        if (playerId != null && !playerId.equals(equip.getPlayerId())) {
+            throw new IllegalStateException("强化目标装备不属于当前角色，equipInstanceId=" + equipInstanceId);
+        }
+        if (equip.getState() == null || equip.getState().intValue() != 1) {
+            throw new IllegalStateException("强化目标装备当前不在背包中，equipInstanceId=" + equipInstanceId);
+        }
+        if (equip.getDeleteFlag() != null && equip.getDeleteFlag().intValue() != 0) {
+            throw new IllegalStateException("强化目标装备已删除，equipInstanceId=" + equipInstanceId);
+        }
+        return equip;
+    }
+
+    /**
+     * 对数值做保留小数位处理。
+     *
+     * @param value 数值
+     * @param scale 小数位数
+     * @return 结果
+     */
+    private double roundNumber(double value, int scale) {
+        double factor = Math.pow(10D, scale);
+        return Math.round(value * factor) / factor;
+    }
+
+    /**
      * 解析 metaJson。
      *
      * @param metaJson 扩展 JSON
@@ -639,7 +986,17 @@ public class CraftTaskSettleService {
         }
 
         for (Map.Entry<Long, Long> entry : outputMap.entrySet()) {
-            addOneItem(playerId, serverId, entry.getKey(), entry.getValue());
+            Long itemId = entry.getKey();
+            Long quantity = entry.getValue();
+            if (itemId == null || quantity == null || quantity.longValue() <= 0L) {
+                continue;
+            }
+            ItemDefEntity itemDef = itemDefMapper.selectById(itemId);
+            if (isEquipmentItem(itemDef)) {
+                grantEquipOutput(playerId, serverId, itemDef, quantity.longValue());
+                continue;
+            }
+            addOneItem(playerId, serverId, itemId, quantity);
         }
     }
 
@@ -651,6 +1008,11 @@ public class CraftTaskSettleService {
      * @return 正式库存数量
      */
     private Long sumFormalQuantity(Long playerId, Long itemId) {
+        ItemDefEntity itemDef = itemDefMapper.selectById(itemId);
+        if (isEquipmentItem(itemDef)) {
+            return sumEquipQuantity(playerId, itemId);
+        }
+
         List<PlayerItemStackEntity> stackList = playerItemStackMapper.selectList(
                 new LambdaQueryWrapper<PlayerItemStackEntity>()
                         .eq(PlayerItemStackEntity::getPlayerId, playerId)
@@ -675,6 +1037,28 @@ public class CraftTaskSettleService {
     }
 
     /**
+     * 汇总玩家装备实例数量。
+     *
+     * @param playerId 玩家ID
+     * @param itemId 物品ID
+     * @return 装备实例数量
+     */
+    private Long sumEquipQuantity(Long playerId, Long itemId) {
+        List<PlayerEquipEntity> equipList = playerEquipMapper.selectList(
+                new LambdaQueryWrapper<PlayerEquipEntity>()
+                        .eq(PlayerEquipEntity::getPlayerId, playerId)
+                        .eq(PlayerEquipEntity::getItemId, itemId)
+                        .eq(PlayerEquipEntity::getState, 1)
+                        .eq(PlayerEquipEntity::getDeleteFlag, 0)
+                        .orderByAsc(PlayerEquipEntity::getId)
+        );
+        if (equipList == null || equipList.isEmpty()) {
+            return 0L;
+        }
+        return (long) equipList.size();
+    }
+
+    /**
      * 扣除单种物品。
      *
      * @param playerId 玩家ID
@@ -684,6 +1068,12 @@ public class CraftTaskSettleService {
     private void deductOneItem(Long playerId, Long itemId, Long quantity) {
         long remain = quantity == null ? 0L : quantity.longValue();
         if (remain <= 0L) {
+            return;
+        }
+
+        ItemDefEntity itemDef = itemDefMapper.selectById(itemId);
+        if (isEquipmentItem(itemDef)) {
+            deductEquipItem(playerId, itemId, remain);
             return;
         }
 
@@ -721,6 +1111,34 @@ public class CraftTaskSettleService {
 
         if (remain > 0L) {
             throw new IllegalStateException("材料不足，itemId=" + itemId);
+        }
+    }
+
+    /**
+     * 扣除装备实例。
+     *
+     * @param playerId 玩家ID
+     * @param itemId 装备物品ID
+     * @param quantity 扣除数量
+     */
+    private void deductEquipItem(Long playerId, Long itemId, long quantity) {
+        List<PlayerEquipEntity> equipList = playerEquipMapper.selectList(
+                new LambdaQueryWrapper<PlayerEquipEntity>()
+                        .eq(PlayerEquipEntity::getPlayerId, playerId)
+                        .eq(PlayerEquipEntity::getItemId, itemId)
+                        .eq(PlayerEquipEntity::getState, 1)
+                        .eq(PlayerEquipEntity::getDeleteFlag, 0)
+                        .orderByAsc(PlayerEquipEntity::getId)
+        );
+        if (equipList == null || equipList.size() < quantity) {
+            throw new IllegalStateException("材料不足，itemId=" + itemId);
+        }
+        for (int i = 0; i < quantity; i++) {
+            PlayerEquipEntity equip = equipList.get(i);
+            equip.setState(0);
+            equip.setDeleteFlag(1);
+            equip.setUpdateUser("-1");
+            playerEquipMapper.updateById(equip);
         }
     }
 

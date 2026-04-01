@@ -34,6 +34,7 @@ import com.urr.infra.mapper.PlayerMapper;
 import com.urr.infra.mapper.WalletMapper;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -121,6 +122,11 @@ public class GatherTaskReadServiceImpl implements GatherTaskReadService {
      * JSON 编解码器。
      */
     private final ObjectMapper objectMapper;
+
+    /**
+     * JDBC 查询器。
+     */
+    private final JdbcTemplate jdbcTemplate;
 
     /**
      * 视图组装器。
@@ -556,6 +562,9 @@ public class GatherTaskReadServiceImpl implements GatherTaskReadService {
                     pendingQuantity
             ));
         }
+
+        List<QueryGatherTaskPanelResult.InventoryEntryView> equipEntryList = buildEquipInventoryEntryList(playerId);
+        entryList.addAll(equipEntryList);
         return gatherTaskViewAssembler.buildInventoryView(entryList);
     }
 
@@ -604,11 +613,146 @@ public class GatherTaskReadServiceImpl implements GatherTaskReadService {
             List<ItemDefEntity> itemDefList = itemDefMapper.selectBatchIds(itemQtyMap.keySet());
             for (int i = 0; i < itemDefList.size(); i++) {
                 ItemDefEntity itemDef = itemDefList.get(i);
+                if (itemDef == null || itemDef.getId() == null) {
+                    continue;
+                }
+                if (itemDef.getItemType() != null && itemDef.getItemType() == 4) {
+                    continue;
+                }
                 Long qty = itemQtyMap.get(itemDef.getId());
                 mergeAmount(result, buildRewardKey("ITEM", itemDef.getItemCode()), qty);
             }
         }
         return result;
+    }
+
+    /**
+     * 组装装备展示库存。
+     *
+     * 说明：
+     * 1. 装备不再从 t_urr_player_item_stack 展示，统一从 t_urr_player_equip 读取。
+     * 2. 这里按 itemId + strengthenLevel 聚合，避免同强化等级的同类装备重复展示多行。
+     * 3. rewardCode 仍然返回原始 itemCode，便于前端继续复用图片 / 名称等现有逻辑。
+     *
+     * @param playerId 角色ID
+     * @return 装备展示库存列表
+     */
+    private List<QueryGatherTaskPanelResult.InventoryEntryView> buildEquipInventoryEntryList(Long playerId) {
+        Map<String, EquipInventoryAmount> equipAmountMap = queryEquipInventoryAmountMap(playerId);
+        if (equipAmountMap.isEmpty()) {
+            return new ArrayList<QueryGatherTaskPanelResult.InventoryEntryView>();
+        }
+
+        Set<Long> itemIdSet = new LinkedHashSet<Long>();
+        for (EquipInventoryAmount amount : equipAmountMap.values()) {
+            itemIdSet.add(amount.getItemId());
+        }
+
+        Map<Long, ItemDefEntity> itemDefMap = new LinkedHashMap<Long, ItemDefEntity>();
+        List<ItemDefEntity> itemDefList = itemDefMapper.selectBatchIds(itemIdSet);
+        for (int i = 0; i < itemDefList.size(); i++) {
+            ItemDefEntity itemDef = itemDefList.get(i);
+            itemDefMap.put(itemDef.getId(), itemDef);
+        }
+
+        List<String> equipKeyList = new ArrayList<String>(equipAmountMap.keySet());
+        Collections.sort(equipKeyList);
+
+        List<QueryGatherTaskPanelResult.InventoryEntryView> result = new ArrayList<QueryGatherTaskPanelResult.InventoryEntryView>();
+        for (int i = 0; i < equipKeyList.size(); i++) {
+            EquipInventoryAmount amount = equipAmountMap.get(equipKeyList.get(i));
+            ItemDefEntity itemDef = itemDefMap.get(amount.getItemId());
+            if (itemDef == null) {
+                continue;
+            }
+            String rewardName = buildEquipRewardName(itemDef.getNameZh(), amount.getStrengthenLevel());
+            result.add(gatherTaskViewAssembler.buildInventoryEntryView(
+                    "ITEM",
+                    itemDef.getItemCode(),
+                    rewardName,
+                    amount.getQuantity(),
+                    0L
+            ));
+        }
+        return result;
+    }
+
+    /**
+     * 查询角色装备库存并按 itemId + 强化等级聚合。
+     *
+     * @param playerId 角色ID
+     * @return 聚合结果
+     */
+    private Map<String, EquipInventoryAmount> queryEquipInventoryAmountMap(Long playerId) {
+        Map<String, EquipInventoryAmount> result = new LinkedHashMap<String, EquipInventoryAmount>();
+        String sql = "SELECT item_id, attr_json FROM t_urr_player_equip WHERE player_id = ? AND delete_flag = 0";
+        List<Map<String, Object>> rowList = jdbcTemplate.queryForList(sql, playerId);
+        for (int i = 0; i < rowList.size(); i++) {
+            Map<String, Object> row = rowList.get(i);
+            Long itemId = toLong(row.get("item_id"));
+            if (itemId == null) {
+                continue;
+            }
+            Integer strengthenLevel = parseStrengthenLevel(safeText(row.get("attr_json") == null ? null : String.valueOf(row.get("attr_json"))));
+            String key = buildEquipInventoryKey(itemId, strengthenLevel);
+            EquipInventoryAmount amount = result.get(key);
+            if (amount == null) {
+                amount = new EquipInventoryAmount();
+                amount.setItemId(itemId);
+                amount.setStrengthenLevel(strengthenLevel);
+                amount.setQuantity(0L);
+                result.put(key, amount);
+            }
+            amount.setQuantity(safeLong(amount.getQuantity()) + 1L);
+        }
+        return result;
+    }
+
+    /**
+     * 构建装备库存聚合 key。
+     *
+     * @param itemId 物品ID
+     * @param strengthenLevel 强化等级
+     * @return 聚合 key
+     */
+    private String buildEquipInventoryKey(Long itemId, Integer strengthenLevel) {
+        return String.valueOf(itemId) + "#" + safeInteger(strengthenLevel);
+    }
+
+    /**
+     * 构建装备展示名称。
+     *
+     * @param baseName 基础名称
+     * @param strengthenLevel 强化等级
+     * @return 展示名称
+     */
+    private String buildEquipRewardName(String baseName, Integer strengthenLevel) {
+        int safeStrengthenLevel = safeInteger(strengthenLevel);
+        if (safeStrengthenLevel <= 0) {
+            return baseName;
+        }
+        return safeText(baseName) + " +" + safeStrengthenLevel;
+    }
+
+    /**
+     * 解析强化等级。
+     *
+     * @param attrJson 装备属性 JSON
+     * @return 强化等级
+     */
+    private Integer parseStrengthenLevel(String attrJson) {
+        if (!StringUtils.hasText(attrJson)) {
+            return 0;
+        }
+        try {
+            JsonNode root = objectMapper.readTree(attrJson);
+            if (!root.hasNonNull("strengthenLevel")) {
+                return 0;
+            }
+            return root.get("strengthenLevel").asInt(0);
+        } catch (Exception e) {
+            return 0;
+        }
     }
 
     /**
@@ -931,6 +1075,36 @@ public class GatherTaskReadServiceImpl implements GatherTaskReadService {
     }
 
     /**
+     * 安全 int 处理。
+     *
+     * @param value 原值
+     * @return 非 null int
+     */
+    private int safeInteger(Integer value) {
+        return value == null ? 0 : value;
+    }
+
+    /**
+     * 将对象转换为 Long。
+     *
+     * @param value 原始对象
+     * @return Long 值
+     */
+    private Long toLong(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Number) {
+            return ((Number) value).longValue();
+        }
+        try {
+            return Long.valueOf(String.valueOf(value));
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
      * pending 数据。
      */
     @Data
@@ -983,6 +1157,17 @@ public class GatherTaskReadServiceImpl implements GatherTaskReadService {
         private Integer segmentSize;
         private Long rewardSeed;
         private Integer lockedRoundCount;
+    }
+
+    /**
+     * 装备库存聚合对象。
+     */
+    @Data
+    private static class EquipInventoryAmount {
+
+        private Long itemId;
+        private Integer strengthenLevel;
+        private Long quantity;
     }
 
     /**

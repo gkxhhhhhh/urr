@@ -353,6 +353,14 @@ public class GatherTaskControllerAssembler {
             entry.setFormalQuantity(view.getFormalQuantity());
             entry.setPendingQuantity(view.getPendingQuantity());
             entry.setDisplayQuantity(view.getDisplayQuantity());
+            entry.setItemId(view.getItemId());
+            entry.setEquipInstanceId(view.getEquipInstanceId());
+            entry.setItemType(view.getItemType());
+            entry.setItemLevel(view.getItemLevel());
+            entry.setStrengthenLevel(view.getStrengthenLevel());
+            entry.setEquipCategory(view.getEquipCategory());
+            entry.setBaseAttack(view.getBaseAttack());
+            entry.setCurrentAttack(view.getCurrentAttack());
             responseList.add(entry);
         }
 

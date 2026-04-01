@@ -21,11 +21,13 @@ import com.urr.domain.action.task.PlayerActionQueueEntity;
 import com.urr.domain.action.task.PlayerActionTask;
 import com.urr.domain.action.task.PlayerCraftTask;
 import com.urr.domain.item.ItemDefEntity;
+import com.urr.domain.item.PlayerEquipEntity;
 import com.urr.domain.item.PlayerItemStackEntity;
 import com.urr.domain.player.PlayerEntity;
 import com.urr.domain.skill.PlayerSkillEntity;
 import com.urr.infra.mapper.ActionDefMapper;
 import com.urr.infra.mapper.ItemDefMapper;
+import com.urr.infra.mapper.PlayerEquipMapper;
 import com.urr.infra.mapper.PlayerItemStackMapper;
 import com.urr.infra.mapper.PlayerMapper;
 import com.urr.infra.mapper.PlayerSkillMapper;
@@ -98,6 +100,11 @@ public class ProfessionActionReadServiceImpl implements ProfessionActionReadServ
      * 玩家背包 Mapper。
      */
     private final PlayerItemStackMapper playerItemStackMapper;
+
+    /**
+     * 玩家装备实例 Mapper。
+     */
+    private final PlayerEquipMapper playerEquipMapper;
 
     /**
      * 玩家技能 Mapper。
@@ -343,6 +350,29 @@ public class ProfessionActionReadServiceImpl implements ProfessionActionReadServ
      * @return 库存视图
      */
     private QueryGatherTaskPanelResult.InventoryView buildInventoryView(Long playerId) {
+        QueryGatherTaskPanelResult.InventoryView view = QueryGatherTaskPanelResult.InventoryView.createEmpty();
+        List<QueryGatherTaskPanelResult.InventoryEntryView> entryList = new ArrayList<>();
+
+        List<PlayerEquipEntity> equipList = playerEquipMapper.selectList(
+                new LambdaQueryWrapper<PlayerEquipEntity>()
+                        .eq(PlayerEquipEntity::getPlayerId, playerId)
+                        .eq(PlayerEquipEntity::getState, 1)
+                        .eq(PlayerEquipEntity::getDeleteFlag, 0)
+                        .orderByDesc(PlayerEquipEntity::getId)
+        );
+        if (equipList != null && !equipList.isEmpty()) {
+            for (int i = 0; i < equipList.size(); i++) {
+                PlayerEquipEntity equip = equipList.get(i);
+                if (equip == null) {
+                    continue;
+                }
+                QueryGatherTaskPanelResult.InventoryEntryView equipEntry = buildEquipInventoryEntry(equip);
+                if (equipEntry != null) {
+                    entryList.add(equipEntry);
+                }
+            }
+        }
+
         List<PlayerItemStackEntity> stackList = playerItemStackMapper.selectList(
                 new LambdaQueryWrapper<PlayerItemStackEntity>()
                         .eq(PlayerItemStackEntity::getPlayerId, playerId)
@@ -350,35 +380,179 @@ public class ProfessionActionReadServiceImpl implements ProfessionActionReadServ
                         .orderByDesc(PlayerItemStackEntity::getQty)
                         .orderByAsc(PlayerItemStackEntity::getId)
         );
-
-        QueryGatherTaskPanelResult.InventoryView view = QueryGatherTaskPanelResult.InventoryView.createEmpty();
-        if (stackList == null || stackList.isEmpty()) {
-            return view;
-        }
-
-        List<QueryGatherTaskPanelResult.InventoryEntryView> entryList = new ArrayList<>();
-        for (int i = 0; i < stackList.size(); i++) {
-            PlayerItemStackEntity stack = stackList.get(i);
-            if (stack == null || stack.getQty() == null || stack.getQty().longValue() <= 0L) {
-                continue;
+        if (stackList != null && !stackList.isEmpty()) {
+            for (int i = 0; i < stackList.size(); i++) {
+                PlayerItemStackEntity stack = stackList.get(i);
+                if (stack == null || stack.getQty() == null || stack.getQty().longValue() <= 0L) {
+                    continue;
+                }
+                QueryGatherTaskPanelResult.InventoryEntryView stackEntry = buildStackInventoryEntry(stack);
+                if (stackEntry != null) {
+                    entryList.add(stackEntry);
+                }
             }
-
-            ItemDefEntity itemDef = itemDefMapper.selectById(stack.getItemId());
-
-            QueryGatherTaskPanelResult.InventoryEntryView entryView =
-                    new QueryGatherTaskPanelResult.InventoryEntryView();
-            entryView.setRewardType("ITEM");
-            entryView.setRewardCode(itemDef == null ? String.valueOf(stack.getItemId()) : itemDef.getItemCode());
-            entryView.setRewardName(itemDef == null ? String.valueOf(stack.getItemId()) : itemDef.getNameZh());
-            entryView.setFormalQuantity(stack.getQty());
-            entryView.setPendingQuantity(0L);
-            entryView.setDisplayQuantity(stack.getQty());
-            entryList.add(entryView);
         }
 
         view.setEntryList(entryList);
         view.setEntryCount(entryList.size());
         return view;
+    }
+
+    /**
+     * 构建堆叠物品展示项。
+     *
+     * @param stack 堆叠物品
+     * @return 展示项
+     */
+    private QueryGatherTaskPanelResult.InventoryEntryView buildStackInventoryEntry(PlayerItemStackEntity stack) {
+        if (stack == null) {
+            return null;
+        }
+        ItemDefEntity itemDef = itemDefMapper.selectById(stack.getItemId());
+        QueryGatherTaskPanelResult.InventoryEntryView entryView = new QueryGatherTaskPanelResult.InventoryEntryView();
+        entryView.setRewardType("ITEM");
+        entryView.setRewardCode(itemDef == null ? String.valueOf(stack.getItemId()) : itemDef.getItemCode());
+        entryView.setRewardName(itemDef == null ? String.valueOf(stack.getItemId()) : itemDef.getNameZh());
+        entryView.setFormalQuantity(stack.getQty());
+        entryView.setPendingQuantity(0L);
+        entryView.setDisplayQuantity(stack.getQty());
+        entryView.setItemId(stack.getItemId());
+        entryView.setItemType(itemDef == null ? null : itemDef.getItemType());
+        entryView.setItemLevel(resolveItemLevel(itemDef, null));
+        entryView.setEquipCategory(resolveEquipCategory(itemDef));
+        return entryView;
+    }
+
+    /**
+     * 构建设备实例展示项。
+     *
+     * @param equip 装备实例
+     * @return 展示项
+     */
+    private QueryGatherTaskPanelResult.InventoryEntryView buildEquipInventoryEntry(PlayerEquipEntity equip) {
+        if (equip == null || equip.getItemId() == null) {
+            return null;
+        }
+        ItemDefEntity itemDef = itemDefMapper.selectById(equip.getItemId());
+        JsonNode itemMetaNode = parseJsonNode(itemDef == null ? null : itemDef.getMetaJson());
+        JsonNode attrNode = parseJsonNode(equip.getAttrJson());
+
+        QueryGatherTaskPanelResult.InventoryEntryView entryView = new QueryGatherTaskPanelResult.InventoryEntryView();
+        entryView.setRewardType("EQUIP");
+        entryView.setRewardCode(itemDef == null ? String.valueOf(equip.getItemId()) : itemDef.getItemCode());
+        entryView.setRewardName(itemDef == null ? String.valueOf(equip.getItemId()) : itemDef.getNameZh());
+        entryView.setFormalQuantity(1L);
+        entryView.setPendingQuantity(0L);
+        entryView.setDisplayQuantity(1L);
+        entryView.setItemId(equip.getItemId());
+        entryView.setEquipInstanceId(equip.getId());
+        entryView.setItemType(itemDef == null ? 4 : itemDef.getItemType());
+        entryView.setItemLevel(resolveItemLevel(itemDef, attrNode));
+        entryView.setStrengthenLevel(readInt(attrNode, "strengthenLevel", 0));
+        entryView.setEquipCategory(resolveEquipCategory(itemDef));
+        entryView.setBaseAttack(readDouble(attrNode, "baseAttack", readDouble(itemMetaNode.path("baseAttrs"), "attack", 0D)));
+        entryView.setCurrentAttack(readDouble(attrNode, "currentAttack", entryView.getBaseAttack() == null ? 0D : entryView.getBaseAttack()));
+        return entryView;
+    }
+
+    /**
+     * 解析装备类别。
+     *
+     * @param itemDef 物品定义
+     * @return 装备类别
+     */
+    private String resolveEquipCategory(ItemDefEntity itemDef) {
+        JsonNode itemMetaNode = parseJsonNode(itemDef == null ? null : itemDef.getMetaJson());
+        return readText(itemMetaNode, "equipCategory");
+    }
+
+    /**
+     * 解析物品等级。
+     *
+     * @param itemDef 物品定义
+     * @param attrNode 装备扩展属性
+     * @return 物品等级
+     */
+    private Integer resolveItemLevel(ItemDefEntity itemDef, JsonNode attrNode) {
+        int attrItemLevel = readInt(attrNode, "itemLevel", 0);
+        if (attrItemLevel > 0) {
+            return attrItemLevel;
+        }
+        JsonNode itemMetaNode = parseJsonNode(itemDef == null ? null : itemDef.getMetaJson());
+        int metaItemLevel = readInt(itemMetaNode, "itemLevel", 0);
+        if (metaItemLevel > 0) {
+            return metaItemLevel;
+        }
+        int tier = readInt(itemMetaNode, "tier", 1);
+        return tier <= 0 ? 1 : tier;
+    }
+
+    /**
+     * 解析 JSON 节点。
+     *
+     * @param json JSON 文本
+     * @return JSON 节点
+     */
+    private JsonNode parseJsonNode(String json) {
+        if (!StringUtils.hasText(json)) {
+            return null;
+        }
+        try {
+            return objectMapper.readTree(json);
+        } catch (Exception ignore) {
+            return null;
+        }
+    }
+
+    /**
+     * 读取文本字段。
+     *
+     * @param root 根节点
+     * @param fieldName 字段名
+     * @return 文本值
+     */
+    private String readText(JsonNode root, String fieldName) {
+        if (root == null || !StringUtils.hasText(fieldName)) {
+            return null;
+        }
+        JsonNode node = root.get(fieldName);
+        if (node == null || node.isNull()) {
+            return null;
+        }
+        String value = node.asText();
+        return StringUtils.hasText(value) ? value.trim() : null;
+    }
+
+    /**
+     * 读取整数值。
+     *
+     * @param root 根节点
+     * @param fieldName 字段名
+     * @param defaultValue 默认值
+     * @return 整数值
+     */
+    private Integer readInt(JsonNode root, String fieldName, int defaultValue) {
+        if (root == null || !StringUtils.hasText(fieldName)) {
+            return defaultValue;
+        }
+        JsonNode node = root.get(fieldName);
+        return node == null || node.isNull() ? defaultValue : node.asInt(defaultValue);
+    }
+
+    /**
+     * 读取小数值。
+     *
+     * @param root 根节点
+     * @param fieldName 字段名
+     * @param defaultValue 默认值
+     * @return 小数值
+     */
+    private Double readDouble(JsonNode root, String fieldName, double defaultValue) {
+        if (root == null || !StringUtils.hasText(fieldName)) {
+            return defaultValue;
+        }
+        JsonNode node = root.get(fieldName);
+        return node == null || node.isNull() ? defaultValue : node.asDouble(defaultValue);
     }
 
     /**

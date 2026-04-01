@@ -42,6 +42,12 @@ public class ProfessionActionCommandControllerAssembler {
         command.setCommandType(commandType == null ? null : commandType.getCode());
         command.setActionCode(request.getActionCode());
         command.setTargetCount(request.getTargetCount());
+        command.setEquipInstanceId(request.getEquipInstanceId());
+        command.setTeaType(request.getTeaType());
+        command.setBlessedTeaUsed(request.getBlessedTeaUsed());
+        command.setDrinkConcentration(request.getDrinkConcentration());
+        command.setObservatoryLevel(request.getObservatoryLevel());
+        command.setExtraSuccessRate(request.getExtraSuccessRate());
         return command;
     }
 
