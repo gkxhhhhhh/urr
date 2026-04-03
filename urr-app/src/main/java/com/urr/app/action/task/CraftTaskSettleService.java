@@ -160,9 +160,10 @@ public class CraftTaskSettleService {
 
             consumeCost(craftTask.getPlayerId(), snapshot.getCostMap());
 
+            boolean strengtheningSnapshot = isStrengtheningSnapshot(snapshot);
             boolean success = rollCraftSuccess(craftTask.getPlayerId(), snapshot);
             if (success) {
-                if (isStrengtheningSnapshot(snapshot)) {
+                if (strengtheningSnapshot) {
                     applyStrengtheningSuccess(craftTask.getPlayerId(), craftTask.getServerId(), snapshot);
                 } else {
                     grantOutput(craftTask.getPlayerId(), craftTask.getServerId(), snapshot.getOutputMap());
@@ -182,6 +183,8 @@ public class CraftTaskSettleService {
                             snapshot.getExpGain()
                     );
                 }
+            } else if (strengtheningSnapshot) {
+                applyStrengtheningFailure(craftTask.getPlayerId(), snapshot);
             }
 
             craftTask.setCompletedCount(craftTask.getSafeCompletedCount() + 1L);
@@ -624,10 +627,30 @@ public class CraftTaskSettleService {
             nextStrengthenLevel = 20;
         }
 
-        double baseAttack = readDouble(attrNode, "baseAttack", readDouble(itemMetaNode == null ? null : itemMetaNode.path("baseAttrs"), "attack", 0D));
+        double baseAttack = resolveEquipBaseAttack(attrNode, itemMetaNode);
         int itemLevel = resolveStrengtheningItemLevel(itemMetaNode, attrNode);
         double currentAttack = calculateStrengthenedAttack(baseAttack, nextStrengthenLevel);
-        equip.setAttrJson(buildStrengthenedAttrJson(attrNode, nextStrengthenLevel, itemLevel, baseAttack, currentAttack));
+        equip.setAttrJson(buildStrengthenedAttrJson(attrNode, nextStrengthenLevel, itemLevel, baseAttack, currentAttack, "SUCCESS"));
+        equip.setUpdateUser("-1");
+        playerEquipMapper.updateById(equip);
+    }
+
+    /**
+     * 应用强化失败结果。
+     *
+     * @param playerId 玩家ID
+     * @param snapshot 配方快照
+     */
+    private void applyStrengtheningFailure(Long playerId, RecipeSnapshot snapshot) {
+        JsonNode metaNode = parseMetaJson(snapshot == null ? null : snapshot.getMetaJson());
+        PlayerEquipEntity equip = requireStrengtheningEquip(playerId, metaNode == null ? 0L : metaNode.path("equipInstanceId").asLong(0L));
+        ItemDefEntity itemDef = itemDefMapper.selectById(equip.getItemId());
+        JsonNode itemMetaNode = parseMetaJson(itemDef == null ? null : itemDef.getMetaJson());
+        JsonNode attrNode = parseMetaJson(equip.getAttrJson());
+
+        double baseAttack = resolveEquipBaseAttack(attrNode, itemMetaNode);
+        int itemLevel = resolveStrengtheningItemLevel(itemMetaNode, attrNode);
+        equip.setAttrJson(buildStrengthenedAttrJson(attrNode, 0, itemLevel, baseAttack, baseAttack, "FAIL"));
         equip.setUpdateUser("-1");
         playerEquipMapper.updateById(equip);
     }
@@ -666,6 +689,26 @@ public class CraftTaskSettleService {
                                              int itemLevel,
                                              double baseAttack,
                                              double currentAttack) {
+        return buildStrengthenedAttrJson(attrNode, strengthenLevel, itemLevel, baseAttack, currentAttack, null);
+    }
+
+    /**
+     * 构建强化后的 attrJson。
+     *
+     * @param attrNode 原始扩展
+     * @param strengthenLevel 强化等级
+     * @param itemLevel 物品等级
+     * @param baseAttack 基础攻击
+     * @param currentAttack 当前攻击
+     * @param lastStrengthenResult 最近一次强化结果
+     * @return attrJson
+     */
+    private String buildStrengthenedAttrJson(JsonNode attrNode,
+                                             int strengthenLevel,
+                                             int itemLevel,
+                                             double baseAttack,
+                                             double currentAttack,
+                                             String lastStrengthenResult) {
         ObjectNode node;
         if (attrNode instanceof ObjectNode) {
             node = (ObjectNode) attrNode.deepCopy();
@@ -676,6 +719,11 @@ public class CraftTaskSettleService {
         node.put("itemLevel", itemLevel);
         node.put("baseAttack", roundNumber(baseAttack, 4));
         node.put("currentAttack", roundNumber(currentAttack, 4));
+        if (lastStrengthenResult == null || lastStrengthenResult.trim().isEmpty()) {
+            node.remove("lastStrengthenResult");
+        } else {
+            node.put("lastStrengthenResult", lastStrengthenResult.trim().toUpperCase());
+        }
         return node.toString();
     }
 
@@ -743,6 +791,25 @@ public class CraftTaskSettleService {
         }
         int tier = readInt(itemMetaNode, "tier", 1);
         return tier <= 0 ? 1 : tier;
+    }
+
+    /**
+     * 解析装备基础攻击。
+     *
+     * @param attrNode 装备属性节点
+     * @param itemMetaNode 物品 meta 节点
+     * @return 基础攻击
+     */
+    private double resolveEquipBaseAttack(JsonNode attrNode, JsonNode itemMetaNode) {
+        double itemMetaAttack = readDouble(itemMetaNode == null ? null : itemMetaNode.path("baseAttrs"), "attack", 0D);
+        double attrBaseAttack = readDouble(attrNode, "baseAttack", itemMetaAttack);
+        if (attrBaseAttack > 0D) {
+            return roundNumber(attrBaseAttack, 4);
+        }
+        if (itemMetaAttack > 0D) {
+            return roundNumber(itemMetaAttack, 4);
+        }
+        return roundNumber(attrBaseAttack, 4);
     }
 
     /**

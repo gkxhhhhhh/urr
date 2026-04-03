@@ -20,7 +20,7 @@ public class UrrApplication {
             String hostAddress = InetAddress.getLocalHost().getHostAddress();
             log.info(
                     "\r\n\r\n==============================================================\r\n"
-                            + "\r\n   启动完成，访问地址：" + hostAddress + ":"
+                            + "\r\n  启动完成,访问地址：" + hostAddress + ":"
                             + environment.getProperty("server.port")
                             + "\r\n\r\n==============================================================\r\n");
         }catch (Exception e){
